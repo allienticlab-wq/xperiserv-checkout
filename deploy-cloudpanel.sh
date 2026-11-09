@@ -42,7 +42,7 @@ fi
 
 # 2. Install packages
 echo "📦 Installing Node.js dependencies..."
-npm install --include=dev
+npm install --include=dev --legacy-peer-deps
 
 # 3. Push database tables if DATABASE_URL is reachable
 echo "🗄️ Syncing PostgreSQL database tables..."
