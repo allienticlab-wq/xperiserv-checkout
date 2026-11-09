@@ -948,7 +948,7 @@ app.post('/api/v1/pay/:token/checkout', async (req, res) => {
   }
 });
 
-// Save Mailgun SMTP Configuration (including SMTP Password) to PostgreSQL
+// Save Mailgun SMTP & REST API Configuration to PostgreSQL
 app.post('/api/v1/notifications/mailgun-config', optionalAuth, async (req: AuthRequest, res) => {
   try {
     await ensureSeeded();
@@ -958,6 +958,8 @@ app.post('/api/v1/notifications/mailgun-config', optionalAuth, async (req: AuthR
       mailgunDomain,
       smtpUser,
       smtpPassword,
+      mailgunApiKey,
+      mailgunRegion,
       smtpFrom,
       testRecipient,
     } = req.body;
@@ -982,7 +984,14 @@ app.post('/api/v1/notifications/mailgun-config', optionalAuth, async (req: AuthR
       mailgunDomain: (mailgunDomain || prevConfig.mailgunDomain || 'mg.xperiserv.in').trim(),
       smtpUser: (smtpUser || prevConfig.smtpUser || 'postmaster@mg.xperiserv.in').trim(),
       smtpPassword:
-        smtpPassword !== undefined ? smtpPassword : prevConfig.smtpPassword || process.env.SMTP_PASSWORD || '',
+        smtpPassword !== undefined
+          ? smtpPassword
+          : prevConfig.smtpPassword || process.env.SMTP_PASSWORD || '',
+      mailgunApiKey:
+        mailgunApiKey !== undefined
+          ? mailgunApiKey
+          : prevConfig.mailgunApiKey || process.env.MAILGUN_API_KEY || '',
+      mailgunRegion: mailgunRegion === 'EU' ? 'EU' : prevConfig.mailgunRegion || 'US',
       smtpFrom: (
         smtpFrom ||
         prevConfig.smtpFrom ||
@@ -1019,6 +1028,7 @@ app.post('/api/v1/notifications/mailgun-config', optionalAuth, async (req: AuthR
         mailgunDomain: updatedConfig.mailgunDomain,
         smtpUser: updatedConfig.smtpUser,
         hasPassword: Boolean(updatedConfig.smtpPassword),
+        hasApiKey: Boolean(updatedConfig.mailgunApiKey),
       }),
       ipAddress: req.ip || '127.0.0.1',
     });
@@ -1027,7 +1037,7 @@ app.post('/api/v1/notifications/mailgun-config', optionalAuth, async (req: AuthR
       saved: true,
       mailgunConfig: {
         ...updatedConfig,
-        hasPasswordConfigured: Boolean(updatedConfig.smtpPassword),
+        hasPasswordConfigured: Boolean(updatedConfig.smtpPassword || updatedConfig.mailgunApiKey),
       },
     });
   } catch (error: any) {
@@ -1035,9 +1045,51 @@ app.post('/api/v1/notifications/mailgun-config', optionalAuth, async (req: AuthR
   }
 });
 
-// Mailgun SMTP Test Dispatch Endpoint
+// Live Mailgun SMTP & REST API Connection Diagnostics (Verifies if SMTP/API is working)
+app.post('/api/v1/notifications/mailgun-verify', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    await ensureSeeded();
+    const saved = await NotificationService.getSavedMailgunConfig();
+    const {
+      smtpHost,
+      smtpPort,
+      mailgunDomain,
+      smtpUser,
+      smtpPassword,
+      mailgunApiKey,
+      mailgunRegion,
+      smtpFrom,
+    } = req.body;
+
+    const testConfig = {
+      smtpHost: (smtpHost || saved.smtpHost || 'smtp.mailgun.org').trim(),
+      smtpPort: Number(smtpPort || saved.smtpPort || 587),
+      mailgunDomain: (mailgunDomain || saved.mailgunDomain || 'mg.xperiserv.in').trim(),
+      smtpUser: (smtpUser || saved.smtpUser || 'postmaster@mg.xperiserv.in').trim(),
+      smtpPassword: smtpPassword !== undefined ? smtpPassword : saved.smtpPassword,
+      mailgunApiKey: mailgunApiKey !== undefined ? mailgunApiKey : saved.mailgunApiKey,
+      mailgunRegion: (mailgunRegion === 'EU' ? 'EU' : saved.mailgunRegion || 'US') as 'US' | 'EU',
+      smtpFrom: (
+        smtpFrom ||
+        saved.smtpFrom ||
+        'Allientic Checkout <checkout@mg.xperiserv.in>'
+      ).trim(),
+    };
+
+    const diagnostics = await NotificationService.runLiveDiagnostics({
+      config: testConfig,
+    });
+
+    res.json({ diagnostics });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Mailgun verification check failed' });
+  }
+});
+
+// Mailgun SMTP & API Live Email Test Dispatch Endpoint
 app.post('/api/v1/notifications/mailgun-test', optionalAuth, async (req: AuthRequest, res) => {
   try {
+    await ensureSeeded();
     const {
       recipientEmail,
       mailgunDomain,
@@ -1045,61 +1097,107 @@ app.post('/api/v1/notifications/mailgun-test', optionalAuth, async (req: AuthReq
       smtpPort,
       smtpUser,
       smtpPassword,
+      mailgunApiKey,
+      mailgunRegion,
       smtpFrom,
     } = req.body;
 
-    // Also persist if credentials were provided during test
-    if (smtpHost || smtpUser || smtpPassword !== undefined) {
-      const existingRows = await db
-        .select()
-        .from(systemSettings)
-        .where(eq(systemSettings.settingKey, 'mailgun_smtp_config'));
-      let prevConfig: any = {};
-      if (existingRows[0]) {
-        try {
-          prevConfig = JSON.parse(existingRows[0].settingValueJson);
-        } catch {
-          prevConfig = {};
-        }
-      }
-      const nextCfg = {
-        smtpHost: smtpHost || prevConfig.smtpHost || 'smtp.mailgun.org',
-        smtpPort: smtpPort || prevConfig.smtpPort || '587',
-        mailgunDomain: mailgunDomain || prevConfig.mailgunDomain || 'mg.xperiserv.in',
-        smtpUser: smtpUser || prevConfig.smtpUser || 'postmaster@mg.xperiserv.in',
-        smtpPassword:
-          smtpPassword !== undefined && smtpPassword !== ''
-            ? smtpPassword
-            : prevConfig.smtpPassword || process.env.SMTP_PASSWORD || '',
-        smtpFrom:
-          smtpFrom || prevConfig.smtpFrom || 'Allientic Checkout <checkout@mg.xperiserv.in>',
-        testRecipient: recipientEmail || prevConfig.testRecipient || 'admin@xperiserv.in',
-      };
-      if (existingRows[0]) {
-        await db
-          .update(systemSettings)
-          .set({ settingValueJson: JSON.stringify(nextCfg), updatedAt: new Date() })
-          .where(eq(systemSettings.id, existingRows[0].id));
-      } else {
-        await db.insert(systemSettings).values({
-          settingKey: 'mailgun_smtp_config',
-          settingValueJson: JSON.stringify(nextCfg),
-        });
+    const existingRows = await db
+      .select()
+      .from(systemSettings)
+      .where(eq(systemSettings.settingKey, 'mailgun_smtp_config'));
+    let prevConfig: any = {};
+    if (existingRows[0]) {
+      try {
+        prevConfig = JSON.parse(existingRows[0].settingValueJson);
+      } catch {
+        prevConfig = {};
       }
     }
 
-    const targetEmail = recipientEmail || req.dbUser?.email || 'admin@xperiserv.in';
-    const logged = await NotificationService.sendAndLog({
+    const nextCfg = {
+      smtpHost: (smtpHost || prevConfig.smtpHost || 'smtp.mailgun.org').trim(),
+      smtpPort: (smtpPort || prevConfig.smtpPort || '587').toString().trim(),
+      mailgunDomain: (mailgunDomain || prevConfig.mailgunDomain || 'mg.xperiserv.in').trim(),
+      smtpUser: (smtpUser || prevConfig.smtpUser || 'postmaster@mg.xperiserv.in').trim(),
+      smtpPassword:
+        smtpPassword !== undefined && smtpPassword !== ''
+          ? smtpPassword
+          : prevConfig.smtpPassword || process.env.SMTP_PASSWORD || '',
+      mailgunApiKey:
+        mailgunApiKey !== undefined && mailgunApiKey !== ''
+          ? mailgunApiKey
+          : prevConfig.mailgunApiKey || process.env.MAILGUN_API_KEY || '',
+      mailgunRegion: mailgunRegion === 'EU' ? 'EU' : prevConfig.mailgunRegion || 'US',
+      smtpFrom: (
+        smtpFrom ||
+        prevConfig.smtpFrom ||
+        'Allientic Checkout <checkout@mg.xperiserv.in>'
+      ).trim(),
+      testRecipient: (recipientEmail || prevConfig.testRecipient || 'admin@xperiserv.in').trim(),
+    };
+
+    if (existingRows[0]) {
+      await db
+        .update(systemSettings)
+        .set({ settingValueJson: JSON.stringify(nextCfg), updatedAt: new Date() })
+        .where(eq(systemSettings.id, existingRows[0].id));
+    } else {
+      await db.insert(systemSettings).values({
+        settingKey: 'mailgun_smtp_config',
+        settingValueJson: JSON.stringify(nextCfg),
+      });
+    }
+
+    const targetEmail = nextCfg.testRecipient;
+    const { subject, html } = NotificationService.buildBrandedHtml({
       eventType: 'payment.success',
       recipientEmail: targetEmail,
-      customerName: 'Allientic Admin (Mailgun SMTP Verification)',
+      customerName: 'Allientic Admin (Mailgun Live Verification)',
       orderNumber: `MG-VERIFY-${new Date().getFullYear()}`,
       amountFormatted: '₹1.00',
       transactionId: `MG-SMTP-${Date.now().toString(36).toUpperCase()}`,
       gatewayName: 'PayU India / Zoho Payments',
-      extraNote: `Dispatched via Mailgun SMTP (${smtpHost || 'smtp.mailgun.org'}:${smtpPort || '587'} · Login: ${smtpUser || 'postmaster@mg.xperiserv.in'} · Domain: ${mailgunDomain || 'mg.xperiserv.in'} · Auth: ${smtpPassword ? 'SMTP Password Verified' : 'Configured'}).`,
+      extraNote: `Dispatched via Mailgun (${nextCfg.smtpHost}:${nextCfg.smtpPort} · Domain: ${nextCfg.mailgunDomain}).`,
     });
-    res.json({ notification: logged });
+
+    const diagnostics = await NotificationService.runLiveDiagnostics({
+      config: {
+        smtpHost: nextCfg.smtpHost,
+        smtpPort: Number(nextCfg.smtpPort || 587),
+        mailgunDomain: nextCfg.mailgunDomain,
+        smtpUser: nextCfg.smtpUser,
+        smtpPassword: nextCfg.smtpPassword,
+        mailgunApiKey: nextCfg.mailgunApiKey,
+        mailgunRegion: nextCfg.mailgunRegion as 'US' | 'EU',
+        smtpFrom: nextCfg.smtpFrom,
+      },
+      sendTestEmailTo: targetEmail,
+      subject,
+      htmlBody: html,
+    });
+
+    const statusLabel = diagnostics.emailDispatched
+      ? diagnostics.smtpWorking
+        ? 'Delivered (Live Mailgun SMTP 250 OK)'
+        : 'Delivered (Live Mailgun REST API 200 OK)'
+      : diagnostics.overallWorking
+        ? 'Verified (Mailgun Connected)'
+        : 'Failed (Mailgun Auth / Connection Error)';
+
+    const logged = await NotificationService.sendAndLog({
+      eventType: 'payment.success',
+      recipientEmail: targetEmail,
+      customerName: 'Allientic Admin (Mailgun Live Verification)',
+      orderNumber: `MG-VERIFY-${new Date().getFullYear()}`,
+      amountFormatted: '₹1.00',
+      transactionId: `MG-SMTP-${Date.now().toString(36).toUpperCase()}`,
+      gatewayName: 'PayU India / Zoho Payments',
+      extraNote: diagnostics.summary,
+      precomputedStatus: statusLabel,
+    });
+
+    res.json({ notification: logged, diagnostics });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Mailgun SMTP test failed' });
   }

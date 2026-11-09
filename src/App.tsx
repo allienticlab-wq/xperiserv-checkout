@@ -240,12 +240,31 @@ export default function App() {
     mailgunDomain: 'mg.xperiserv.in',
     smtpUser: 'postmaster@mg.xperiserv.in',
     smtpPassword: '',
+    mailgunApiKey: '',
+    mailgunRegion: 'US' as 'US' | 'EU',
     smtpFrom: 'Allientic Checkout <checkout@mg.xperiserv.in>',
     testRecipient: 'admin@xperiserv.in',
   });
   const [showMailgunPassword, setShowMailgunPassword] = useState<boolean>(false);
   const [savingMailgunConfig, setSavingMailgunConfig] = useState<boolean>(false);
+  const [verifyingMailgun, setVerifyingMailgun] = useState<boolean>(false);
   const [sendingMailgunTest, setSendingMailgunTest] = useState<boolean>(false);
+  const [mailgunDiagnostics, setMailgunDiagnostics] = useState<{
+    overallWorking: boolean;
+    smtpWorking: boolean;
+    apiWorking: boolean;
+    testedAt: string;
+    summary: string;
+    emailDispatched?: boolean;
+    queueMessageId?: string;
+    steps: Array<{
+      step: string;
+      status: 'PASS' | 'FAIL' | 'SKIP';
+      latencyMs: number;
+      detail: string;
+      serverResponse?: string;
+    }>;
+  } | null>(null);
   const [securityTestResults, setSecurityTestResults] = useState<Array<{
     name: string;
     category: string;
@@ -307,6 +326,8 @@ export default function App() {
           mailgunDomain: data.mailgunConfig.mailgunDomain || prev.mailgunDomain,
           smtpUser: data.mailgunConfig.smtpUser || prev.smtpUser,
           smtpPassword: data.mailgunConfig.smtpPassword ?? prev.smtpPassword,
+          mailgunApiKey: data.mailgunConfig.mailgunApiKey ?? prev.mailgunApiKey,
+          mailgunRegion: data.mailgunConfig.mailgunRegion === 'EU' ? 'EU' : 'US',
           smtpFrom: data.mailgunConfig.smtpFrom || prev.smtpFrom,
           testRecipient: data.mailgunConfig.testRecipient || prev.testRecipient,
         }));
@@ -865,13 +886,35 @@ export default function App() {
       if (res.ok) {
         await fetchPlatformData();
         showToast(
-          `Saved Mailgun SMTP settings & password (${mailgunConfig.smtpUser} @ ${mailgunConfig.smtpHost}:${mailgunConfig.smtpPort})`
+          `Saved Mailgun SMTP & API credentials (${mailgunConfig.smtpUser} @ ${mailgunConfig.smtpHost}:${mailgunConfig.smtpPort})`
         );
       } else {
         showToast(data.error || 'Failed to save Mailgun settings');
       }
     } finally {
       setSavingMailgunConfig(false);
+    }
+  };
+
+  const handleVerifyMailgunConnection = async () => {
+    setVerifyingMailgun(true);
+    try {
+      const res = await fetch('/api/v1/notifications/mailgun-verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(mailgunConfig),
+      });
+      const data = await res.json();
+      if (data.diagnostics) {
+        setMailgunDiagnostics(data.diagnostics);
+        showToast(data.diagnostics.summary);
+      } else {
+        showToast(data.error || 'Failed to verify Mailgun connection');
+      }
+    } catch (err: any) {
+      showToast(err.message || 'Failed to run Mailgun diagnostic test');
+    } finally {
+      setVerifyingMailgun(false);
     }
   };
 
@@ -888,13 +931,20 @@ export default function App() {
           smtpPort: mailgunConfig.smtpPort,
           smtpUser: mailgunConfig.smtpUser,
           smtpPassword: mailgunConfig.smtpPassword,
+          mailgunApiKey: mailgunConfig.mailgunApiKey,
+          mailgunRegion: mailgunConfig.mailgunRegion,
           smtpFrom: mailgunConfig.smtpFrom,
         }),
       });
+      const data = await res.json();
+      if (data.diagnostics) {
+        setMailgunDiagnostics(data.diagnostics);
+      }
       if (res.ok) {
         await fetchPlatformData();
         showToast(
-          `Dispatched test email via Mailgun SMTP (${mailgunConfig.smtpHost}:${mailgunConfig.smtpPort}) to ${mailgunConfig.testRecipient}`
+          data.diagnostics?.summary ||
+            `Tested Mailgun dispatch (${mailgunConfig.smtpHost}:${mailgunConfig.smtpPort}) to ${mailgunConfig.testRecipient}`
         );
       }
     } finally {
@@ -2918,27 +2968,37 @@ export default function App() {
               {/* 13. EMAIL NOTIFICATIONS (MAILGUN SMTP) */}
               {activeSection === 'notifications' && (
                 <div className="space-y-6">
-                  {/* Mailgun SMTP Configuration & Test Bar */}
+                  {/* Mailgun SMTP & REST API Configuration + Live Connection Tester */}
                   <form
                     onSubmit={handleSaveMailgunConfig}
                     className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4 text-xs"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
                       <div>
-                        <h2 className="text-base font-bold text-white flex items-center gap-2">
-                          <span>Mailgun SMTP Transactional Mailer Configuration</span>
+                        <h2 className="text-base font-bold text-white flex items-center gap-2 flex-wrap">
+                          <span>Mailgun SMTP &amp; API Transactional Mailer</span>
                           <span
                             className={`px-2 py-0.5 text-[10px] font-mono rounded border ${
-                              mailgunConfig.smtpPassword
-                                ? 'bg-emerald-950 text-emerald-300 border-emerald-500/30'
-                                : 'bg-amber-950 text-amber-300 border-amber-500/30'
+                              mailgunDiagnostics
+                                ? mailgunDiagnostics.overallWorking
+                                  ? 'bg-emerald-950 text-emerald-300 border-emerald-500/40'
+                                  : 'bg-rose-950 text-rose-300 border-rose-500/40'
+                                : mailgunConfig.smtpPassword || mailgunConfig.mailgunApiKey
+                                  ? 'bg-emerald-950 text-emerald-300 border-emerald-500/30'
+                                  : 'bg-amber-950 text-amber-300 border-amber-500/30'
                             }`}
                           >
-                            {mailgunConfig.smtpPassword ? 'SMTP Password Set' : 'Password Required'}
+                            {mailgunDiagnostics
+                              ? mailgunDiagnostics.overallWorking
+                                ? 'LIVE VERIFIED: WORKING'
+                                : 'LIVE TEST: NOT WORKING'
+                              : mailgunConfig.smtpPassword || mailgunConfig.mailgunApiKey
+                                ? 'Credentials Set (Click Test Connection)'
+                                : 'SMTP Password / API Key Required'}
                           </span>
                         </h2>
                         <p className="text-slate-400 mt-0.5">
-                          Configured with Mailgun SMTP relay (
+                          Live SMTP Handshake (DNS → TCP → STARTTLS → AUTH LOGIN) &amp; Mailgun REST API v3 Verification (
                           <span className="font-mono text-emerald-400">
                             {mailgunConfig.smtpHost}:{mailgunConfig.smtpPort}
                           </span>{' '}
@@ -2957,14 +3017,25 @@ export default function App() {
                             setMailgunConfig({ ...mailgunConfig, testRecipient: e.target.value })
                           }
                           placeholder="Recipient email for Mailgun test"
-                          className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 w-56"
+                          className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 w-52"
                         />
                         <button
                           type="submit"
                           disabled={savingMailgunConfig}
-                          className="px-4 py-2 font-semibold bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/40 rounded-lg whitespace-nowrap"
+                          className="px-3.5 py-2 font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg whitespace-nowrap"
                         >
-                          {savingMailgunConfig ? 'Saving...' : 'Save Mailgun Credentials'}
+                          {savingMailgunConfig ? 'Saving...' : 'Save Credentials'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={verifyingMailgun}
+                          onClick={handleVerifyMailgunConnection}
+                          className="px-3.5 py-2 font-semibold bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/40 rounded-lg whitespace-nowrap flex items-center gap-1.5"
+                        >
+                          <Play className="w-3.5 h-3.5" />
+                          {verifyingMailgun
+                            ? 'Testing Handshake...'
+                            : 'Test SMTP / API Connection'}
                         </button>
                         <button
                           type="button"
@@ -2972,12 +3043,12 @@ export default function App() {
                           onClick={handleSendMailgunTest}
                           className="px-4 py-2 font-semibold bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg whitespace-nowrap"
                         >
-                          {sendingMailgunTest ? 'Sending via Mailgun...' : 'Send Test Mailgun Email'}
+                          {sendingMailgunTest ? 'Sending Live Email...' : 'Send Live Test Email'}
                         </button>
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                       <div>
                         <label className="block text-slate-400 mb-1">Mailgun SMTP Host</label>
                         <input
@@ -2991,7 +3062,7 @@ export default function App() {
                         />
                       </div>
                       <div>
-                        <label className="block text-slate-400 mb-1">SMTP Port (TLS)</label>
+                        <label className="block text-slate-400 mb-1">SMTP Port (587 / 465 / 2525)</label>
                         <input
                           type="text"
                           value={mailgunConfig.smtpPort}
@@ -3053,6 +3124,36 @@ export default function App() {
                       </div>
                       <div>
                         <label className="block text-slate-400 mb-1">
+                          Mailgun Private API Key (Optional REST API)
+                        </label>
+                        <input
+                          type={showMailgunPassword ? 'text' : 'password'}
+                          value={mailgunConfig.mailgunApiKey}
+                          onChange={(e) =>
+                            setMailgunConfig({ ...mailgunConfig, mailgunApiKey: e.target.value })
+                          }
+                          placeholder="key-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:border-emerald-500 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-400 mb-1">Mailgun API Region</label>
+                        <select
+                          value={mailgunConfig.mailgunRegion}
+                          onChange={(e) =>
+                            setMailgunConfig({
+                              ...mailgunConfig,
+                              mailgunRegion: e.target.value as 'US' | 'EU',
+                            })
+                          }
+                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
+                        >
+                          <option value="US">US (api.mailgun.net)</option>
+                          <option value="EU">EU (api.eu.mailgun.net)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-slate-400 mb-1">
                           Sender From Address (SMTP_FROM)
                         </label>
                         <input
@@ -3066,6 +3167,106 @@ export default function App() {
                         />
                       </div>
                     </div>
+
+                    {/* Live Step-by-Step SMTP & API Diagnostic Report */}
+                    {mailgunDiagnostics && (
+                      <div
+                        className={`mt-4 rounded-xl border p-4 space-y-3 ${
+                          mailgunDiagnostics.overallWorking
+                            ? 'bg-emerald-950/20 border-emerald-500/40'
+                            : 'bg-rose-950/25 border-rose-500/40'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
+                          <div className="flex items-center gap-2">
+                            {mailgunDiagnostics.overallWorking ? (
+                              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                            ) : (
+                              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                            )}
+                            <span
+                              className={`font-bold text-xs ${
+                                mailgunDiagnostics.overallWorking
+                                  ? 'text-emerald-300'
+                                  : 'text-rose-300'
+                              }`}
+                            >
+                              {mailgunDiagnostics.summary}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-3 text-[11px] font-mono text-slate-400">
+                            <span>
+                              SMTP Auth:{' '}
+                              <strong
+                                className={
+                                  mailgunDiagnostics.smtpWorking
+                                    ? 'text-emerald-400'
+                                    : 'text-rose-400'
+                                }
+                              >
+                                {mailgunDiagnostics.smtpWorking ? 'WORKING (235 OK)' : 'FAILED'}
+                              </strong>
+                            </span>
+                            <span>·</span>
+                            <span>
+                              REST API:{' '}
+                              <strong
+                                className={
+                                  mailgunDiagnostics.apiWorking
+                                    ? 'text-emerald-400'
+                                    : 'text-slate-400'
+                                }
+                              >
+                                {mailgunDiagnostics.apiWorking
+                                  ? 'WORKING (200 OK)'
+                                  : mailgunConfig.mailgunApiKey
+                                    ? 'FAILED'
+                                    : 'NOT USED'}
+                              </strong>
+                            </span>
+                            <span>·</span>
+                            <span>
+                              Tested: {new Date(mailgunDiagnostics.testedAt).toLocaleTimeString()}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                          {mailgunDiagnostics.steps.map((st, idx) => (
+                            <div
+                              key={idx}
+                              className="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-1"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold text-white">{st.step}</span>
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <span className="font-mono text-[10px] text-slate-400">
+                                    {st.latencyMs}ms
+                                  </span>
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                                      st.status === 'PASS'
+                                        ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/30'
+                                        : st.status === 'FAIL'
+                                          ? 'bg-rose-950 text-rose-300 border border-rose-500/30'
+                                          : 'bg-slate-900 text-slate-400 border border-slate-700'
+                                    }`}
+                                  >
+                                    {st.status}
+                                  </span>
+                                </div>
+                              </div>
+                              <p className="text-[11px] text-slate-300">{st.detail}</p>
+                              {st.serverResponse && (
+                                <div className="text-[10px] font-mono text-emerald-400/90 bg-slate-900/90 px-2 py-1 rounded border border-slate-800 truncate">
+                                  Server: {st.serverResponse}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </form>
 
                   <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -3075,6 +3276,7 @@ export default function App() {
                           <tr className="border-b border-slate-800 bg-slate-950/50 text-slate-400">
                             <th className="py-3 px-4">Event</th>
                             <th className="py-3 px-4">Recipient &amp; Mailgun Host</th>
+                            <th className="py-3 px-4">Delivery Status</th>
                             <th className="py-3 px-4">Subject</th>
                             <th className="py-3 px-4 text-right">Template</th>
                           </tr>
@@ -3088,6 +3290,20 @@ export default function App() {
                                 <div className="text-[11px] font-mono text-slate-500">
                                   {n.smtpHost || 'smtp.mailgun.org'}
                                 </div>
+                              </td>
+                              <td className="py-3 px-4">
+                                <span
+                                  className={`inline-block px-2 py-0.5 rounded text-[10px] font-mono ${
+                                    (n.status || '').startsWith('Delivered') ||
+                                    (n.status || '').startsWith('Verified')
+                                      ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/30'
+                                      : (n.status || '').startsWith('Failed')
+                                        ? 'bg-rose-950 text-rose-300 border border-rose-500/30'
+                                        : 'bg-slate-950 text-slate-300 border border-slate-800'
+                                  }`}
+                                >
+                                  {n.status || 'Logged'}
+                                </span>
                               </td>
                               <td className="py-3 px-4 text-slate-300">{n.subject}</td>
                               <td className="py-3 px-4 text-right">

@@ -573,7 +573,14 @@ export async function getPlatformSnapshot() {
           mailgunDomain: parsed.mailgunDomain || process.env.MAILGUN_DOMAIN || 'mg.xperiserv.in',
           smtpUser: parsed.smtpUser || process.env.SMTP_USER || 'postmaster@mg.xperiserv.in',
           smtpPassword: parsed.smtpPassword || process.env.SMTP_PASSWORD || '',
-          hasPasswordConfigured: Boolean(parsed.smtpPassword || process.env.SMTP_PASSWORD),
+          mailgunApiKey: parsed.mailgunApiKey || process.env.MAILGUN_API_KEY || '',
+          mailgunRegion: parsed.mailgunRegion === 'EU' ? 'EU' : 'US',
+          hasPasswordConfigured: Boolean(
+            parsed.smtpPassword ||
+              process.env.SMTP_PASSWORD ||
+              parsed.mailgunApiKey ||
+              process.env.MAILGUN_API_KEY
+          ),
           smtpFrom:
             parsed.smtpFrom ||
             process.env.SMTP_FROM ||
@@ -611,7 +618,9 @@ export async function getPlatformSnapshot() {
         mailgunDomain: process.env.MAILGUN_DOMAIN || 'mg.xperiserv.in',
         smtpUser: process.env.SMTP_USER || 'postmaster@mg.xperiserv.in',
         smtpPassword: process.env.SMTP_PASSWORD || '',
-        hasPasswordConfigured: Boolean(process.env.SMTP_PASSWORD),
+        mailgunApiKey: process.env.MAILGUN_API_KEY || '',
+        mailgunRegion: 'US',
+        hasPasswordConfigured: Boolean(process.env.SMTP_PASSWORD || process.env.MAILGUN_API_KEY),
         smtpFrom: process.env.SMTP_FROM || 'Allientic Checkout <checkout@mg.xperiserv.in>',
         testRecipient: 'admin@xperiserv.in',
       },
