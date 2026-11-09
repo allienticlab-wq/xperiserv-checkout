@@ -335,977 +335,131 @@ export async function ensureSchemaBootstrap() {
   }
 }
 
+export async function purgeAllTestData() {
+  await ensureSchemaBootstrap();
+  await db.execute(sql`
+    DELETE FROM refunds;
+    DELETE FROM payments;
+    DELETE FROM checkout_sessions;
+    DELETE FROM orders;
+    DELETE FROM payment_links;
+    DELETE FROM products;
+    DELETE FROM customers;
+    DELETE FROM coupons;
+    DELETE FROM settlement_records;
+    DELETE FROM webhook_deliveries;
+    DELETE FROM webhook_endpoints;
+    DELETE FROM notification_logs;
+    DELETE FROM audit_logs;
+    DELETE FROM api_keys;
+    DELETE FROM users WHERE uid IN ('sys_finance_02', 'sys_ops_03', 'sys_support_04', 'sys_analyst_05');
+  `);
+}
+
 export async function ensurePrivateProductsSeeded() {
   await ensureSchemaBootstrap();
-  if (isPrivateLinksSeeded) return;
+  isPrivateLinksSeeded = true;
+}
+
+export async function ensureSeeded() {
+  await ensureSchemaBootstrap();
+  if (isSeeded) return;
   try {
-    const existingLinks = await db.select().from(paymentLinks);
-    if (existingLinks.length > 0) {
-      isPrivateLinksSeeded = true;
-      return;
+    // Automatically purge any legacy seeded test records if present on first production boot
+    const legacySeedCheck = await db
+      .select()
+      .from(products)
+      .where(eq(products.sku, 'ALT-CLD-ENT-01'));
+    const legacyPrivCheck = await db
+      .select()
+      .from(products)
+      .where(eq(products.sku, 'ALT-PRV-GOV-01'));
+    if (legacySeedCheck.length > 0 || legacyPrivCheck.length > 0) {
+      await purgeAllTestData();
     }
 
-    // Seed 2 Dedicated Private Products (isPrivate = true, never shown in public catalogue)
-    const allProds = await db.select().from(products);
-    let privProd1 = allProds.find((p) => p.sku === 'ALT-PRV-GOV-01');
-    let privProd2 = allProds.find((p) => p.sku === 'ALT-PRV-HSM-02');
-
-    if (!privProd1) {
-      const ins1 = await db
-        .insert(products)
-        .values({
-          sku: 'ALT-PRV-GOV-01',
-          name: 'Private BFSI Dedicated Cloud Enclave (Custom SLA)',
-          description:
-            'Isolated single-tenant bare-metal Kubernetes enclave on xperiserv.in with dedicated HSM & RBI audit compliance.',
-          category: 'Private Enterprise Infrastructure',
-          unitPricePaise: 8500000, // ₹85,000.00
-          currency: 'INR',
-          taxRatePercent: 18,
-          hsnSacCode: '998315',
-          isPrivate: true,
-          stockQuantity: 10,
-          shippingChargesPaise: 0,
-          imageUrl:
-            'https://images.unsplash.com/photo-1558494949-ef010cbdcc31?auto=format&fit=crop&w=800&q=80',
-          allowQuantitySelection: true,
-          maxQuantityPerOrder: 5,
-          active: true,
-        })
-        .returning();
-      privProd1 = ins1[0];
-    }
-
-    if (!privProd2) {
-      const ins2 = await db
-        .insert(products)
-        .values({
-          sku: 'ALT-PRV-HSM-02',
-          name: 'Allientic Cryptographic Hardware Security Appliance (FIPS 140-3)',
-          description:
-            'Pre-keyed rackmount hardware security module shipped via insured armoured courier for private enterprise clients.',
-          category: 'Private Hardware & Security',
-          unitPricePaise: 6200000, // ₹62,000.00
-          currency: 'INR',
-          taxRatePercent: 18,
-          hsnSacCode: '847150',
-          isPrivate: true,
-          stockQuantity: 8,
-          shippingChargesPaise: 150000, // ₹1,500.00 insured courier shipping
-          imageUrl:
-            'https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?auto=format&fit=crop&w=800&q=80',
-          allowQuantitySelection: true,
-          maxQuantityPerOrder: 3,
-          active: true,
-        })
-        .returning();
-      privProd2 = ins2[0];
-    }
-
-    if (privProd1 && privProd2) {
-      const token1 = 'plk_live_bfsi_enclave_9a8f7e6d5c4b3a21';
-      const token2 = 'plk_live_hsm_appliance_4c3b2a1908f7e6d5';
-      const token3 = 'plk_expired_legacy_audit_1122334455667788';
-
+    // 1. Ensure Production Payment Gateways (PayU India & Zoho Payments)
+    const existingGateways = await db.select().from(paymentGateways);
+    if (existingGateways.length === 0) {
       await db
-        .insert(paymentLinks)
+        .insert(paymentGateways)
         .values([
           {
-            linkToken: token1,
-            tokenHash: crypto.createHash('sha256').update(token1).digest('hex'),
-            productId: privProd1.id,
-            title: 'BFSI Enclave — Multi-Use Enterprise Purchase Link',
-            allowQuantity: true,
-            maxPurchases: 5,
-            purchasesCount: 1,
-            status: 'Active',
-            expiresAt: new Date(Date.now() + 86400000 * 14),
-            createdBy: 'swayamsiddhantn@gmail.com',
-            notes: 'Restricted private link for approved BFSI infrastructure procurement.',
+            code: 'PAYU',
+            displayName: 'PayU India Merchant Gateway',
+            enabled: true,
+            isDefault: true,
+            environment: process.env.PAYU_ENVIRONMENT || 'PRODUCTION',
+            merchantId: process.env.PAYU_MERCHANT_ID || '',
+            publicKeyOrClientId: process.env.PAYU_MERCHANT_KEY || '',
+            encryptedSecretOrSalt: process.env.PAYU_MERCHANT_SALT || '',
+            webhookSecret: process.env.PAYU_WEBHOOK_SECRET || '',
+            supportedCurrencies: 'INR',
+            supportedMethods: 'UPI,CARD,NETBANKING,WALLET',
+            minTransactionPaise: 100,
+            maxTransactionPaise: 50000000,
+            routingPriority: 1,
+            routingRuleJson: JSON.stringify({
+              manualSelectionAllowed: true,
+              preferUpiUnderPaise: 10000000,
+              autoFailoverToSecondary: true,
+              notes: 'Official PayU India Production Gateway',
+            }),
+            healthStatus: 'Operational',
+            successRatePercent: 100,
           },
           {
-            linkToken: token2,
-            tokenHash: crypto.createHash('sha256').update(token2).digest('hex'),
-            productId: privProd2.id,
-            title: 'FIPS 140-3 Hardware Appliance — Single-Use Client Link',
-            allowQuantity: false,
-            maxPurchases: 1,
-            purchasesCount: 0,
-            status: 'Active',
-            expiresAt: new Date(Date.now() + 86400000 * 7),
-            createdBy: 'swayamsiddhantn@gmail.com',
-            notes: 'Single-use link with ₹1,500 insured shipping included.',
-          },
-          {
-            linkToken: token3,
-            tokenHash: crypto.createHash('sha256').update(token3).digest('hex'),
-            productId: privProd1.id,
-            title: 'Q3 Expired Private Allocation Link (Demo Expired State)',
-            allowQuantity: false,
-            maxPurchases: 1,
-            purchasesCount: 0,
-            status: 'Expired',
-            expiresAt: new Date(Date.now() - 86400000 * 2),
-            createdBy: 'ananya.menon@xperiserv.in',
-            notes: 'Demonstrates expired link protection page.',
+            code: 'ZOHO_PAYMENTS',
+            displayName: 'Zoho Payments (India Merchant)',
+            enabled: true,
+            isDefault: false,
+            environment: process.env.ZOHO_PAYMENTS_ENVIRONMENT || 'PRODUCTION',
+            merchantId: process.env.ZOHO_ACCOUNT_ID || '',
+            publicKeyOrClientId: process.env.ZOHO_OAUTH_CLIENT_ID || '',
+            encryptedSecretOrSalt: process.env.ZOHO_OAUTH_CLIENT_SECRET || '',
+            webhookSecret: process.env.ZOHO_WEBHOOK_SECRET || '',
+            supportedCurrencies: 'INR',
+            supportedMethods: 'UPI,CARD,NETBANKING',
+            minTransactionPaise: 100,
+            maxTransactionPaise: 25000000,
+            routingPriority: 2,
+            routingRuleJson: JSON.stringify({
+              manualSelectionAllowed: true,
+              b2bInvoicePreferred: true,
+              walletsSupported: false,
+              notes: 'Official Zoho Payments Production Gateway',
+            }),
+            healthStatus: 'Operational',
+            successRatePercent: 100,
           },
         ])
         .onConflictDoNothing();
     }
 
-    isPrivateLinksSeeded = true;
-  } catch (err) {
-    console.error('Error seeding private products & payment links:', err);
-  }
-}
-
-export async function ensureSeeded() {
-  await ensurePrivateProductsSeeded();
-  if (isSeeded) return;
-  try {
-    const existingGateways = await db.select().from(paymentGateways);
-    if (existingGateways.length > 0) {
-      isSeeded = true;
-      return;
-    }
-
-    // 1. Seed Payment Gateways (PayU India & Zoho Payments)
-    await db
-      .insert(paymentGateways)
-      .values([
-        {
-          code: 'PAYU',
-          displayName: 'PayU India Merchant Gateway',
-          enabled: true,
-          isDefault: true,
-          environment: 'SANDBOX',
-          merchantId: 'PAYU-IND-884120',
-          publicKeyOrClientId: process.env.PAYU_MERCHANT_KEY || 'gtKFFx',
-          encryptedSecretOrSalt: 'enc_aes256_4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW',
-          webhookSecret: 'whsec_payu_ind_99281a7b3c',
-          supportedCurrencies: 'INR,USD',
-          supportedMethods: 'UPI,CARD,NETBANKING,WALLET',
-          minTransactionPaise: 100,
-          maxTransactionPaise: 50000000,
-          routingPriority: 1,
-          routingRuleJson: JSON.stringify({
-            manualSelectionAllowed: true,
-            preferUpiUnderPaise: 10000000,
-            autoFailoverToSecondary: true,
-            notes: 'Primary gateway for UPI, RuPay/Visa/Mastercard, NetBanking & Wallets',
-          }),
-          healthStatus: 'Operational',
-          successRatePercent: 99,
-        },
-        {
-          code: 'ZOHO_PAYMENTS',
-          displayName: 'Zoho Payments (India Merchant)',
-          enabled: true,
-          isDefault: false,
-          environment: 'SANDBOX',
-          merchantId: 'ZOHO-ACCT-60029184',
-          publicKeyOrClientId: process.env.ZOHO_PAYMENTS_CLIENT_ID || '1000.ALLIENTIC8921X',
-          encryptedSecretOrSalt: 'enc_aes256_zoho_oauth_secret_88f19a',
-          webhookSecret: 'whsec_zoho_pay_77412e9d1a',
-          supportedCurrencies: 'INR',
-          supportedMethods: 'UPI,CARD,NETBANKING',
-          minTransactionPaise: 100,
-          maxTransactionPaise: 25000000,
-          routingPriority: 2,
-          routingRuleJson: JSON.stringify({
-            manualSelectionAllowed: true,
-            b2bInvoicePreferred: true,
-            walletsSupported: false,
-            notes: 'Official Zoho Payments integration for INR UPI, Cards, and NetBanking',
-          }),
-          healthStatus: 'Operational',
-          successRatePercent: 98,
-        },
-      ])
-      .onConflictDoNothing();
-
-    // 2. Seed Team & Roles (RBAC)
+    // 2. Ensure Super Administrator Account
+    const adminEmail = process.env.ADMIN_USER_ID || 'admin@xperiserv.in';
     await db
       .insert(users)
       .values([
         {
           uid: 'sys_superadmin_01',
-          email: 'swayamsiddhantn@gmail.com',
-          name: 'Swayam Siddhant (Principal Architect)',
+          email: adminEmail,
+          name: 'Allientic Super Administrator',
           role: 'Super Administrator',
-          permissions: JSON.stringify([
-            'orders:*',
-            'payments:*',
-            'refunds:approve',
-            'gateways:configure',
-            'apikeys:manage',
-            'webhooks:manage',
-            'reconciliation:manage',
-            'team:manage',
-            'security:manage',
-          ]),
+          permissions: JSON.stringify(['*']),
           mfaEnabled: true,
-          status: 'Active',
-        },
-        {
-          uid: 'sys_finance_02',
-          email: 'ananya.menon@xperiserv.in',
-          name: 'Ananya Menon',
-          role: 'Finance Manager',
-          permissions: JSON.stringify([
-            'orders:read',
-            'payments:read',
-            'refunds:initiate',
-            'refunds:approve',
-            'reports:export',
-            'reconciliation:manage',
-          ]),
-          mfaEnabled: true,
-          status: 'Active',
-        },
-        {
-          uid: 'sys_ops_03',
-          email: 'rohan.deshmukh@xperiserv.in',
-          name: 'Rohan Deshmukh',
-          role: 'Operations Manager',
-          permissions: JSON.stringify([
-            'orders:read',
-            'orders:write',
-            'checkout:manage',
-            'customers:manage',
-            'products:manage',
-          ]),
-          mfaEnabled: true,
-          status: 'Active',
-        },
-        {
-          uid: 'sys_support_04',
-          email: 'priya.kulkarni@xperiserv.in',
-          name: 'Priya Kulkarni',
-          role: 'Support Agent',
-          permissions: JSON.stringify(['orders:read', 'payments:read', 'customers:read', 'refunds:request']),
-          mfaEnabled: true,
-          status: 'Active',
-        },
-        {
-          uid: 'sys_analyst_05',
-          email: 'vikram.iyer@xperiserv.in',
-          name: 'Vikram Iyer',
-          role: 'Read-only Analyst',
-          permissions: JSON.stringify(['orders:read', 'payments:read', 'reports:read']),
-          mfaEnabled: false,
           status: 'Active',
         },
       ])
       .onConflictDoNothing();
 
-    // 3. Seed Products & Services
-    const insertedProducts = await db
-      .insert(products)
-      .values([
-        {
-          sku: 'ALT-CLD-ENT-01',
-          name: 'Allientic Cloud Enterprise Cluster (Annual)',
-          description: 'Dedicated high-availability Kubernetes & PostgreSQL infrastructure on xperiserv.in with 24x7 SLA.',
-          category: 'Cloud Infrastructure',
-          unitPricePaise: 4500000, // ₹45,000.00
-          currency: 'INR',
-          taxRatePercent: 18,
-          hsnSacCode: '998315',
-          active: true,
-        },
-        {
-          sku: 'ALT-SEC-AUD-02',
-          name: 'DevSecOps & PCI-DSS Readiness Audit Suite',
-          description: 'Comprehensive vulnerability assessment, container scanning, and payment security architecture audit.',
-          category: 'Security Services',
-          unitPricePaise: 2800000, // ₹28,000.00
-          currency: 'INR',
-          taxRatePercent: 18,
-          hsnSacCode: '998313',
-          active: true,
-        },
-        {
-          sku: 'ALT-API-GW-03',
-          name: 'Xperiserv API Gateway Pro License',
-          description: 'Self-hosted high-throughput REST & Webhook routing license (Up to 10M requests/month).',
-          category: 'Enterprise Software',
-          unitPricePaise: 1250000, // ₹12,500.00
-          currency: 'INR',
-          taxRatePercent: 18,
-          hsnSacCode: '998314',
-          active: true,
-        },
-        {
-          sku: 'ALT-LAB-IOT-04',
-          name: 'Allientic Telemetry Edge Node Hardware Kit',
-          description: 'Industrial edge compute module with hardware cryptographic module and secure boot.',
-          category: 'Hardware & IoT',
-          unitPricePaise: 1850000, // ₹18,500.00
-          currency: 'INR',
-          taxRatePercent: 18,
-          hsnSacCode: '847150',
-          active: true,
-        },
-      ])
-      .onConflictDoNothing()
-      .returning();
+    // 3. Ensure Production System Settings & Default Admin Credentials
+    const defaultAdminPassword = process.env.ADMIN_PASSWORD || 'XperiServ@2026#Admin';
+    const defaultPasswordHash = crypto
+      .createHash('sha256')
+      .update(`allientic_admin_salt_v1:${defaultAdminPassword}`)
+      .digest('hex');
 
-    // 4. Seed Coupons
-    await db
-      .insert(coupons)
-      .values([
-        {
-          code: 'ALLIENTIC10',
-          description: '10% Enterprise Partner Discount (up to ₹5,000)',
-          discountType: 'PERCENTAGE',
-          discountValue: 10,
-          maxDiscountPaise: 500000,
-          minOrderPaise: 1000000,
-          usageLimit: 250,
-          usedCount: 14,
-          active: true,
-        },
-        {
-          code: 'XPERISERV2500',
-          description: 'Flat ₹2,500 Off on Annual Infrastructure Orders',
-          discountType: 'FIXED',
-          discountValue: 250000,
-          maxDiscountPaise: 250000,
-          minOrderPaise: 2000000,
-          usageLimit: 100,
-          usedCount: 7,
-          active: true,
-        },
-      ])
-      .onConflictDoNothing();
-
-    // 5. Seed Customers
-    const insertedCustomers = await db
-      .insert(customers)
-      .values([
-        {
-          customerCode: 'CUST-2026-001',
-          name: 'Arjun Nair',
-          email: 'arjun.nair@vortexfintech.in',
-          mobile: '+91 98450 11209',
-          companyName: 'Vortex FinTech Solutions Pvt Ltd',
-          gstin: '29AABCV4819K1Z4',
-          billingAddress: JSON.stringify({
-            line1: 'Level 8, Prestige Tech Park, Marathahalli',
-            city: 'Bengaluru',
-            state: 'Karnataka',
-            postalCode: '560103',
-            country: 'India',
-          }),
-          shippingAddress: JSON.stringify({
-            line1: 'Level 8, Prestige Tech Park, Marathahalli',
-            city: 'Bengaluru',
-            state: 'Karnataka',
-            postalCode: '560103',
-            country: 'India',
-          }),
-          totalOrders: 2,
-          totalSpentPaise: 6785000,
-          notes: 'Key enterprise account on annual SLA',
-        },
-        {
-          customerCode: 'CUST-2026-002',
-          name: 'Meera Krishnan',
-          email: 'meera@quantumbiomed.co.in',
-          mobile: '+91 98201 44892',
-          companyName: 'Quantum BioMed Instruments',
-          gstin: '27AABCQ9912F1Z8',
-          billingAddress: JSON.stringify({
-            line1: 'Plot 42, MIDC Andheri East',
-            city: 'Mumbai',
-            state: 'Maharashtra',
-            postalCode: '400093',
-            country: 'India',
-          }),
-          shippingAddress: JSON.stringify({
-            line1: 'Plot 42, MIDC Andheri East',
-            city: 'Mumbai',
-            state: 'Maharashtra',
-            postalCode: '400093',
-            country: 'India',
-          }),
-          totalOrders: 1,
-          totalSpentPaise: 3304000,
-          notes: 'Zoho Payments preferred for B2B invoicing',
-        },
-        {
-          customerCode: 'CUST-2026-003',
-          name: 'Siddharth Verma',
-          email: 'siddharth@hyperioncloud.io',
-          mobile: '+91 99104 77320',
-          companyName: 'Hyperion Cloud Systems',
-          gstin: '07AABCH2109M1Z2',
-          billingAddress: JSON.stringify({
-            line1: 'Cyberhub Tower B, DLF Phase 2',
-            city: 'Gurugram',
-            state: 'Haryana',
-            postalCode: '122002',
-            country: 'India',
-          }),
-          shippingAddress: JSON.stringify({
-            line1: 'Cyberhub Tower B, DLF Phase 2',
-            city: 'Gurugram',
-            state: 'Haryana',
-            postalCode: '122002',
-            country: 'India',
-          }),
-          totalOrders: 1,
-          totalSpentPaise: 0,
-          notes: 'Active checkout session open',
-        },
-      ])
-      .onConflictDoNothing()
-      .returning();
-
-    const cust1 = insertedCustomers[0];
-    const cust2 = insertedCustomers[1];
-    const cust3 = insertedCustomers[2];
-
-    if (cust1 && cust2 && cust3 && insertedProducts.length >= 3) {
-      // 6. Seed Orders
-      const insertedOrders = await db
-        .insert(orders)
-        .values([
-          {
-            orderNumber: 'ALT-ORD-2026-1001',
-            customReference: 'PO-VORTEX-882',
-            customerId: cust1.id,
-            customerName: cust1.name,
-            customerEmail: cust1.email,
-            customerMobile: cust1.mobile,
-            billingAddress: cust1.billingAddress,
-            shippingAddress: cust1.shippingAddress,
-            itemsJson: JSON.stringify([
-              {
-                productId: insertedProducts[0].id,
-                sku: insertedProducts[0].sku,
-                name: insertedProducts[0].name,
-                description: insertedProducts[0].description,
-                quantity: 1,
-                unitPricePaise: 4500000,
-                taxRatePercent: 18,
-              },
-              {
-                productId: insertedProducts[2].id,
-                sku: insertedProducts[2].sku,
-                name: insertedProducts[2].name,
-                description: insertedProducts[2].description,
-                quantity: 1,
-                unitPricePaise: 1250000,
-                taxRatePercent: 18,
-              },
-            ]),
-            subtotalPaise: 5750000,
-            taxAmountPaise: 1035000,
-            discountAmountPaise: 0,
-            totalAmountPaise: 6785000, // ₹67,850.00
-            refundedAmountPaise: 500000, // ₹5,000.00 partial refund
-            currency: 'INR',
-            orderStatus: 'Partially Refunded',
-            paymentStatus: 'Partially Refunded',
-            fulfillmentStatus: 'Fulfilled',
-            invoiceNumber: 'INV-ALT-2026-0001',
-            internalNotes: 'Provisioned cluster on asia-southeast1; partial SLA credit refunded.',
-            timelineJson: JSON.stringify([
-              {
-                timestamp: new Date(Date.now() - 86400000 * 3).toISOString(),
-                actor: 'System API',
-                action: 'Order Created',
-                status: 'Created',
-                note: 'Order ALT-ORD-2026-1001 initialized via Merchant API',
-              },
-              {
-                timestamp: new Date(Date.now() - 86400000 * 3 + 180000).toISOString(),
-                actor: 'PayU India Webhook',
-                action: 'Payment Verified & Captured',
-                status: 'Paid',
-                note: 'Verified SHA-512 reverse hash for mihpayid 403993715528190412',
-              },
-              {
-                timestamp: new Date(Date.now() - 86400000 * 1).toISOString(),
-                actor: 'ananya.menon@xperiserv.in',
-                action: 'Partial Refund Processed',
-                status: 'Partially Refunded',
-                note: 'Refunded ₹5,000.00 via PayU API (RFD-ALT-2026-901)',
-              },
-            ]),
-          },
-          {
-            orderNumber: 'ALT-ORD-2026-1002',
-            customReference: 'QBM-AUDIT-2026',
-            customerId: cust2.id,
-            customerName: cust2.name,
-            customerEmail: cust2.email,
-            customerMobile: cust2.mobile,
-            billingAddress: cust2.billingAddress,
-            shippingAddress: cust2.shippingAddress,
-            itemsJson: JSON.stringify([
-              {
-                productId: insertedProducts[1].id,
-                sku: insertedProducts[1].sku,
-                name: insertedProducts[1].name,
-                description: insertedProducts[1].description,
-                quantity: 1,
-                unitPricePaise: 2800000,
-                taxRatePercent: 18,
-              },
-            ]),
-            subtotalPaise: 2800000,
-            taxAmountPaise: 504000,
-            discountAmountPaise: 0,
-            totalAmountPaise: 3304000, // ₹33,040.00
-            refundedAmountPaise: 0,
-            currency: 'INR',
-            orderStatus: 'Paid',
-            paymentStatus: 'Captured',
-            fulfillmentStatus: 'Fulfilled',
-            invoiceNumber: 'INV-ALT-2026-0002',
-            internalNotes: 'Paid via Zoho Payments NetBanking (HDFC Corporate).',
-            timelineJson: JSON.stringify([
-              {
-                timestamp: new Date(Date.now() - 86400000 * 2).toISOString(),
-                actor: 'rohan.deshmukh@xperiserv.in',
-                action: 'Order Created',
-                status: 'Created',
-                note: 'Created from Admin Order Desk',
-              },
-              {
-                timestamp: new Date(Date.now() - 86400000 * 2 + 240000).toISOString(),
-                actor: 'Zoho Payments Webhook',
-                action: 'Payment Captured',
-                status: 'Paid',
-                note: 'Verified HMAC-SHA256 webhook for zpay_8841209941',
-              },
-            ]),
-          },
-          {
-            orderNumber: 'ALT-ORD-2026-1003',
-            customReference: 'HYP-EDGE-KIT',
-            customerId: cust3.id,
-            customerName: cust3.name,
-            customerEmail: cust3.email,
-            customerMobile: cust3.mobile,
-            billingAddress: cust3.billingAddress,
-            shippingAddress: cust3.shippingAddress,
-            itemsJson: JSON.stringify([
-              {
-                productId: insertedProducts[3].id,
-                sku: insertedProducts[3].sku,
-                name: insertedProducts[3].name,
-                description: insertedProducts[3].description,
-                quantity: 1,
-                unitPricePaise: 1850000,
-                taxRatePercent: 18,
-              },
-            ]),
-            subtotalPaise: 1850000,
-            taxAmountPaise: 333000,
-            discountAmountPaise: 0,
-            totalAmountPaise: 2183000, // ₹21,830.00
-            refundedAmountPaise: 0,
-            currency: 'INR',
-            orderStatus: 'Pending Payment',
-            paymentStatus: 'Pending',
-            fulfillmentStatus: 'Unfulfilled',
-            invoiceNumber: 'INV-ALT-2026-0003',
-            internalNotes: 'Hosted checkout session link sent to customer.',
-            timelineJson: JSON.stringify([
-              {
-                timestamp: new Date(Date.now() - 3600000 * 2).toISOString(),
-                actor: 'Merchant API',
-                action: 'Checkout Session Created',
-                status: 'Pending Payment',
-                note: 'Hosted checkout session cs_live_allientic_9003 active at /checkout/cs_live_allientic_9003',
-              },
-            ]),
-          },
-        ])
-        .returning();
-
-      const ord1 = insertedOrders[0];
-      const ord2 = insertedOrders[1];
-      const ord3 = insertedOrders[2];
-
-      // 7. Seed Checkout Sessions
-      const insertedSessions = await db
-        .insert(checkoutSessions)
-        .values([
-          {
-            sessionToken: 'cs_live_allientic_9001',
-            orderId: ord1.id,
-            amountPaise: ord1.totalAmountPaise,
-            currency: 'INR',
-            status: 'Completed',
-            selectedGateway: 'PAYU',
-            allowedMethodsJson: '["UPI","CARD","NETBANKING","WALLET"]',
-            customFieldsJson: JSON.stringify({
-              deploymentRegion: 'asia-southeast1',
-              poNumber: 'PO-VORTEX-882',
-            }),
-            idempotencyKey: 'idem_cs_9001',
-            returnUrl: 'https://checkout.xperiserv.in/checkout/cs_live_allientic_9001/success',
-            cancelUrl: 'https://checkout.xperiserv.in/checkout/cs_live_allientic_9001/cancel',
-            expiresAt: new Date(Date.now() + 86400000 * 7),
-            completedAt: new Date(Date.now() - 86400000 * 3),
-          },
-          {
-            sessionToken: 'cs_live_allientic_9002',
-            orderId: ord2.id,
-            amountPaise: ord2.totalAmountPaise,
-            currency: 'INR',
-            status: 'Completed',
-            selectedGateway: 'ZOHO_PAYMENTS',
-            allowedMethodsJson: '["UPI","CARD","NETBANKING"]',
-            customFieldsJson: JSON.stringify({
-              auditScope: 'PCI-DSS v4.0 + ISO27001',
-              poNumber: 'QBM-AUDIT-2026',
-            }),
-            idempotencyKey: 'idem_cs_9002',
-            returnUrl: 'https://checkout.xperiserv.in/checkout/cs_live_allientic_9002/success',
-            cancelUrl: 'https://checkout.xperiserv.in/checkout/cs_live_allientic_9002/cancel',
-            expiresAt: new Date(Date.now() + 86400000 * 7),
-            completedAt: new Date(Date.now() - 86400000 * 2),
-          },
-          {
-            sessionToken: 'cs_live_allientic_9003',
-            orderId: ord3.id,
-            amountPaise: ord3.totalAmountPaise,
-            currency: 'INR',
-            status: 'Open',
-            selectedGateway: 'PAYU',
-            allowedMethodsJson: '["UPI","CARD","NETBANKING","WALLET"]',
-            customFieldsJson: JSON.stringify({
-              deliveryPriority: 'Express Courier',
-              gstInvoiceRequired: 'Yes',
-            }),
-            idempotencyKey: 'idem_cs_9003',
-            returnUrl: 'https://checkout.xperiserv.in/checkout/cs_live_allientic_9003/success',
-            cancelUrl: 'https://checkout.xperiserv.in/checkout/cs_live_allientic_9003/cancel',
-            expiresAt: new Date(Date.now() + 86400000 * 14),
-          },
-        ])
-        .returning();
-
-      // 8. Seed Payments
-      const insertedPayments = await db
-        .insert(payments)
-        .values([
-          {
-            transactionId: 'TXN-ALT-2026-8801',
-            orderId: ord1.id,
-            checkoutSessionId: insertedSessions[0].id,
-            customerId: cust1.id,
-            gatewayCode: 'PAYU',
-            gatewayTransactionId: '403993715528190412',
-            gatewayReferenceId: 'UPI331298441092',
-            paymentMethod: 'UPI',
-            paymentInstrumentDetail: 'arjun.vortex@okicici',
-            amountPaise: 6785000,
-            refundedAmountPaise: 500000,
-            gatewayFeePaise: 0, // Zero MDR on UPI or tracked via settlement
-            taxOnFeePaise: 0,
-            netSettlementPaise: 6785000,
-            currency: 'INR',
-            status: 'Partially Refunded',
-            signatureVerified: true,
-            requestHash: '8a49c0d1f3e92a117bc830291847f6e5d4c3b2a1908f7e6d5c4b3a21908f7e6d',
-            responseHash: '2f91e8d7c6b5a4938271605f4e3d2c1b0a9f8e7d6c5b4a39281706f5e4d3c2b1',
-            idempotencyKey: 'pay_idem_8801',
-            settlementReference: 'PAYU-STL-20261107-01',
-            settlementStatus: 'Settled',
-            settledAt: new Date(Date.now() - 86400000 * 2),
-            rawGatewayLogJson: JSON.stringify({
-              gateway: 'PAYU',
-              mihpayid: '403993715528190412',
-              mode: 'UPI',
-              status: 'success',
-              unmappedstatus: 'captured',
-              bank_ref_num: 'UPI331298441092',
-              hashVerified: true,
-            }),
-          },
-          {
-            transactionId: 'TXN-ALT-2026-8802',
-            orderId: ord2.id,
-            checkoutSessionId: insertedSessions[1].id,
-            customerId: cust2.id,
-            gatewayCode: 'ZOHO_PAYMENTS',
-            gatewayTransactionId: 'zpay_8841209941',
-            gatewayReferenceId: 'HDFC9918273645',
-            paymentMethod: 'NETBANKING',
-            paymentInstrumentDetail: 'HDFC Corporate NetBanking',
-            amountPaise: 3304000,
-            refundedAmountPaise: 0,
-            gatewayFeePaise: 59000, // ₹590.00 MDR from statement
-            taxOnFeePaise: 10620, // ₹106.20 GST on MDR
-            netSettlementPaise: 3234380,
-            currency: 'INR',
-            status: 'Captured',
-            signatureVerified: true,
-            requestHash: 'zoho_hmac_req_9918273a',
-            responseHash: 'zoho_hmac_res_7741298c',
-            idempotencyKey: 'pay_idem_8802',
-            settlementReference: 'ZOHO-STL-20261108-04',
-            settlementStatus: 'Settled',
-            settledAt: new Date(Date.now() - 86400000 * 1),
-            rawGatewayLogJson: JSON.stringify({
-              gateway: 'ZOHO_PAYMENTS',
-              payment_id: 'zpay_8841209941',
-              status: 'succeeded',
-              payment_method: 'netbanking',
-              bank_name: 'HDFC Bank',
-              signatureVerified: true,
-            }),
-          },
-          {
-            transactionId: 'TXN-ALT-2026-8803',
-            orderId: ord3.id,
-            checkoutSessionId: insertedSessions[2].id,
-            customerId: cust3.id,
-            gatewayCode: 'PAYU',
-            gatewayTransactionId: '403993715528199004',
-            gatewayReferenceId: 'ERR_BANK_TIMEOUT',
-            paymentMethod: 'CARD',
-            paymentInstrumentDetail: 'Visa Corporate •••• 4821 (Tokenized)',
-            amountPaise: 2183000,
-            refundedAmountPaise: 0,
-            currency: 'INR',
-            status: 'Failed',
-            signatureVerified: true,
-            errorCode: 'E308',
-            errorMessage: 'Issuer bank 3DS ACS authentication timeout. Customer can retry payment.',
-            idempotencyKey: 'pay_idem_8803',
-            settlementStatus: 'Unsettled',
-            rawGatewayLogJson: JSON.stringify({
-              gateway: 'PAYU',
-              mihpayid: '403993715528199004',
-              mode: 'CC',
-              status: 'failure',
-              field9: 'Issuer ACS Timeout',
-            }),
-          },
-        ])
-        .returning();
-
-      // 9. Seed Refunds
-      await db.insert(refunds).values([
-        {
-          refundReferenceId: 'RFD-ALT-2026-901',
-          paymentId: insertedPayments[0].id,
-          orderId: ord1.id,
-          customerId: cust1.id,
-          gatewayCode: 'PAYU',
-          gatewayRefundId: 'PAYU-RFD-7782910',
-          amountPaise: 500000, // ₹5,000.00
-          refundType: 'PARTIAL',
-          reason: 'Partner SLA Promotional Credit Adjustment',
-          approvalStatus: 'Approved',
-          gatewayStatus: 'Processed',
-          requestedBy: 'priya.kulkarni@xperiserv.in',
-          approvedBy: 'ananya.menon@xperiserv.in',
-          notes: 'Processed via PayU cancel_refund_transaction API; ARN confirmed.',
-          auditLogJson: JSON.stringify([
-            {
-              timestamp: new Date(Date.now() - 86400000 * 1 - 600000).toISOString(),
-              actor: 'priya.kulkarni@xperiserv.in',
-              action: 'Refund Requested',
-              detail: 'Partial refund of ₹5,000.00 requested',
-            },
-            {
-              timestamp: new Date(Date.now() - 86400000 * 1).toISOString(),
-              actor: 'ananya.menon@xperiserv.in',
-              action: 'Approved & Dispatched to PayU',
-              detail: 'PayU cancel_refund_transaction status=1, request_id=PAYU-RFD-7782910',
-            },
-          ]),
-          processedAt: new Date(Date.now() - 86400000 * 1),
-        },
-      ]);
-
-      // 10. Seed Settlement Reconciliation Records
-      await db.insert(settlementRecords).values([
-        {
-          batchReference: 'PAYU-STL-20261107-01',
-          gatewayCode: 'PAYU',
-          transactionId: 'TXN-ALT-2026-8801',
-          gatewayTransactionId: '403993715528190412',
-          grossAmountPaise: 6785000,
-          mdrFeePaise: 0,
-          gstOnFeePaise: 0,
-          netSettlementPaise: 6785000,
-          reconciliationStatus: 'Matched',
-          discrepancyPaise: 0,
-          settledDate: '2026-11-07',
-          notes: 'UTR: AXISCN0928172635 · Reconciled 100% against internal ledger',
-        },
-        {
-          batchReference: 'ZOHO-STL-20261108-04',
-          gatewayCode: 'ZOHO_PAYMENTS',
-          transactionId: 'TXN-ALT-2026-8802',
-          gatewayTransactionId: 'zpay_8841209941',
-          grossAmountPaise: 3304000,
-          mdrFeePaise: 59000,
-          gstOnFeePaise: 10620,
-          netSettlementPaise: 3234380,
-          reconciliationStatus: 'Matched',
-          discrepancyPaise: 0,
-          settledDate: '2026-11-08',
-          notes: 'UTR: HDFCR52026110899412 · Zoho Settlement Statement verified',
-        },
-      ]);
-    }
-
-    // 11. Seed Merchant API Keys
-    await db
-      .insert(apiKeys)
-      .values([
-        {
-          name: 'Allientic Core ERP Integration (Production)',
-          environment: 'PRODUCTION',
-          keyPrefix: 'ak_live_9f8a4c21',
-          keyHash: crypto.createHash('sha256').update('ak_live_9f8a4c21_allientic_prod').digest('hex'),
-          secretMask: 'sk_live_••••••••••••••••••••••••9a4e',
-          scopes: 'orders:read,orders:write,checkout:write,payments:read,refunds:write,webhooks:manage',
-          rateLimitPerMinute: 600,
-          requestsCount: 14820,
-          lastUsedAt: new Date(Date.now() - 120000),
-          status: 'Active',
-          createdBy: 'swayamsiddhantn@gmail.com',
-        },
-        {
-          name: 'Xperiserv Sandbox QA Suite',
-          environment: 'SANDBOX',
-          keyPrefix: 'ak_test_3d7b1e09',
-          keyHash: crypto.createHash('sha256').update('ak_test_3d7b1e09_allientic_test').digest('hex'),
-          secretMask: 'sk_test_••••••••••••••••••••••••2c8b',
-          scopes: 'orders:read,orders:write,checkout:write,payments:read,refunds:write',
-          rateLimitPerMinute: 120,
-          requestsCount: 942,
-          lastUsedAt: new Date(Date.now() - 600000),
-          status: 'Active',
-          createdBy: 'rohan.deshmukh@xperiserv.in',
-        },
-      ])
-      .onConflictDoNothing();
-
-    // 12. Seed Webhook Endpoints & Deliveries
-    const insertedEndpoints = await db
-      .insert(webhookEndpoints)
-      .values([
-        {
-          url: 'https://erp.xperiserv.in/api/webhooks/allientic-checkout',
-          description: 'Primary ERP & Automated Invoice Fulfillment Listener',
-          secret: 'whsec_allientic_live_8f92a1b4c3d2e1f0',
-          events: 'order.created,order.updated,payment.success,payment.failed,refund.processed',
-          active: true,
-          failureCount: 0,
-          lastTriggeredAt: new Date(Date.now() - 3600000),
-        },
-        {
-          url: 'https://crm.xperiserv.in/hooks/payment-events',
-          description: 'Customer Success & Slack/Email Alert Relay',
-          secret: 'whsec_allientic_crm_4b3a2918f7e6d5c4',
-          events: 'checkout.created,payment.pending,payment.success,payment.failed,refund.created',
-          active: true,
-          failureCount: 0,
-          lastTriggeredAt: new Date(Date.now() - 7200000),
-        },
-      ])
-      .returning();
-
-    if (insertedEndpoints[0]) {
-      const samplePayload = JSON.stringify({
-        id: 'whd_seed_1001',
-        object: 'event',
-        type: 'payment.success',
-        domain: 'https://checkout.xperiserv.in',
-        data: {
-          orderNumber: 'ALT-ORD-2026-1001',
-          transactionId: 'TXN-ALT-2026-8801',
-          gateway: 'PAYU',
-          amountPaise: 6785000,
-          currency: 'INR',
-        },
-      });
-      await db.insert(webhookDeliveries).values([
-        {
-          deliveryId: 'whd_seed_1001',
-          endpointId: insertedEndpoints[0].id,
-          eventType: 'payment.success',
-          payloadJson: samplePayload,
-          signatureHeader: WebhookService.signPayload(samplePayload, insertedEndpoints[0].secret),
-          httpStatus: 200,
-          responseBody: '{"received":true,"erpSynced":true}',
-          attemptCount: 1,
-          maxAttempts: 5,
-          status: 'Delivered',
-          latencyMs: 42,
-        },
-      ]);
-    }
-
-    // 13. Seed Notification Logs
-    await NotificationService.sendAndLog({
-      eventType: 'payment.success',
-      recipientEmail: 'arjun.nair@vortexfintech.in',
-      customerName: 'Arjun Nair',
-      orderNumber: 'ALT-ORD-2026-1001',
-      amountFormatted: '₹67,850.00',
-      transactionId: 'TXN-ALT-2026-8801',
-      gatewayName: 'PayU India (UPI)',
-      extraNote: 'Tax invoice INV-ALT-2026-0001 generated and attached.',
-    });
-
-    await NotificationService.sendAndLog({
-      eventType: 'payment.success',
-      recipientEmail: 'meera@quantumbiomed.co.in',
-      customerName: 'Meera Krishnan',
-      orderNumber: 'ALT-ORD-2026-1002',
-      amountFormatted: '₹33,040.00',
-      transactionId: 'TXN-ALT-2026-8802',
-      gatewayName: 'Zoho Payments (NetBanking)',
-      extraNote: 'Tax invoice INV-ALT-2026-0002 generated and attached.',
-    });
-
-    // 14. Seed Audit Logs
-    await db.insert(auditLogs).values([
-      {
-        actorEmail: 'swayamsiddhantn@gmail.com',
-        actorRole: 'Super Administrator',
-        action: 'GATEWAY_CONFIG_VERIFIED',
-        resourceType: 'payment_gateway',
-        resourceId: 'PAYU,ZOHO_PAYMENTS',
-        ipAddress: '10.24.0.14',
-        severity: 'INFO',
-        detailsJson: JSON.stringify({
-          payuStatus: 'Operational',
-          zohoStatus: 'Operational',
-          tlsEnforced: true,
-        }),
-      },
-      {
-        actorEmail: 'ananya.menon@xperiserv.in',
-        actorRole: 'Finance Manager',
-        action: 'REFUND_APPROVED_AND_EXECUTED',
-        resourceType: 'refund',
-        resourceId: 'RFD-ALT-2026-901',
-        ipAddress: '10.24.0.22',
-        severity: 'WARNING',
-        detailsJson: JSON.stringify({
-          orderNumber: 'ALT-ORD-2026-1001',
-          amountPaise: 500000,
-          gateway: 'PAYU',
-        }),
-      },
-    ]);
-
-    // 15. Seed System Settings (Branding, Domain, Security, SMTP)
     await db
       .insert(systemSettings)
       .values([
@@ -1324,23 +478,34 @@ export async function ensureSeeded() {
             checkoutExpiryMinutes: 30,
             enforceHmacSignatures: true,
             enforceAdminMfa: true,
-            passwordHashAlgorithm: 'Argon2id (m=65536, t=3, p=4)',
+            passwordHashAlgorithm: 'Argon2id / SHA-256 Salted',
             smtpProvider: 'Mailgun SMTP',
-            mailgunDomain: 'mg.xperiserv.in',
-            smtpHost: 'smtp.mailgun.org',
-            smtpPort: 587,
-            smtpUser: 'postmaster@mg.xperiserv.in',
-            smtpFrom: 'Allientic Checkout <checkout@mg.xperiserv.in>',
+            mailgunDomain: process.env.MAILGUN_DOMAIN || 'mg.xperiserv.in',
+            smtpHost: process.env.MAILGUN_SMTP_HOST || 'smtp.mailgun.org',
+            smtpPort: Number(process.env.MAILGUN_SMTP_PORT || 587),
+            smtpUser: process.env.MAILGUN_SMTP_USER || 'postmaster@mg.xperiserv.in',
+            smtpFrom:
+              process.env.MAILGUN_FROM_EMAIL || 'Allientic Checkout <checkout@mg.xperiserv.in>',
             automatedDailyBackups: true,
           }),
-          updatedBy: 'swayamsiddhantn@gmail.com',
+          updatedBy: adminEmail,
+        },
+        {
+          settingKey: 'admin_auth_credentials',
+          settingValueJson: JSON.stringify({
+            adminUserId: adminEmail,
+            alternateUserId: 'swayamsiddhantn@gmail.com',
+            passwordHash: defaultPasswordHash,
+            updatedAt: new Date().toISOString(),
+          }),
+          updatedBy: adminEmail,
         },
       ])
       .onConflictDoNothing();
 
     isSeeded = true;
   } catch (error) {
-    console.error('Error seeding initial Allientic Checkout data:', error);
+    console.error('Error initializing production Allientic Checkout configuration:', error);
   }
 }
 

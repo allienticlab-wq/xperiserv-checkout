@@ -90,14 +90,10 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     (defaultGw?.code as 'PAYU' | 'ZOHO_PAYMENTS') || 'PAYU'
   );
 
-  // Guest Customer Details
-  const [customerName, setCustomerName] = useState<string>(order?.customerName || 'Guest Customer');
-  const [customerEmail, setCustomerEmail] = useState<string>(
-    order?.customerEmail || 'customer@xperiserv.in'
-  );
-  const [customerMobile, setCustomerMobile] = useState<string>(
-    order?.customerMobile || '+91 98450 11209'
-  );
+  // Guest Customer Details (Production clean defaults)
+  const [customerName, setCustomerName] = useState<string>(order?.customerName || '');
+  const [customerEmail, setCustomerEmail] = useState<string>(order?.customerEmail || '');
+  const [customerMobile, setCustomerMobile] = useState<string>(order?.customerMobile || '');
   const [billingAddressText, setBillingAddressText] = useState<string>(() => {
     try {
       const parsed = JSON.parse(order?.billingAddress || '{}');
@@ -105,12 +101,10 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
         .filter(Boolean)
         .join(', ');
     } catch {
-      return order?.billingAddress || 'Level 8, Prestige Tech Park, Bengaluru, Karnataka 560103';
+      return order?.billingAddress || '';
     }
   });
-  const [shippingAddressText, setShippingAddressText] = useState<string>(
-    'Level 8, Prestige Tech Park, Bengaluru, Karnataka 560103'
-  );
+  const [shippingAddressText, setShippingAddressText] = useState<string>('');
 
   // Coupon state
   const [couponInput, setCouponInput] = useState<string>(order?.couponCode || '');
@@ -130,9 +124,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
 
   // Private Purchase Link (/pay/{token}) State
   const [privateLinkToken, setPrivateLinkToken] = useState<string>(
-    initialPrivateLinkToken ||
-      paymentLinks.find((l) => l.status === 'Active')?.linkToken ||
-      'plk_live_bfsi_enclave_9a8f7e6d5c4b3a21'
+    initialPrivateLinkToken || paymentLinks.find((l) => l.status === 'Active')?.linkToken || ''
   );
   const [privateLinkData, setPrivateLinkData] = useState<any | null>(null);
   const [privateLinkLoading, setPrivateLinkLoading] = useState<boolean>(false);
@@ -141,11 +133,9 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
 
   // Public Order Tracking State (/track-order with Order ID + Email/Mobile + OTP Verification)
   const [trackOrderIdInput, setTrackOrderIdInput] = useState<string>(
-    initialTrackOrderId || order?.orderNumber || 'ALT-ORD-2026-1001'
+    initialTrackOrderId || order?.orderNumber || ''
   );
-  const [trackContactInput, setTrackContactInput] = useState<string>(
-    order?.customerEmail || 'arjun.nair@vortexfintech.in'
-  );
+  const [trackContactInput, setTrackContactInput] = useState<string>(order?.customerEmail || '');
   const [otpRequested, setOtpRequested] = useState<boolean>(false);
   const [otpInput, setOtpInput] = useState<string>('');
   const [sandboxOtpPreview, setSandboxOtpPreview] = useState<string | null>(null);
@@ -531,54 +521,49 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
       {/* ===================================================================== */}
       {portalMode === 'PRIVATE_LINK' && (
         <main className="flex-1 max-w-6xl w-full mx-auto px-6 py-8 space-y-6">
-          {/* Private Purchase Link URL Bar & Switcher for Testing Active vs Expired Links */}
+          {/* Private Purchase Link URL Bar */}
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4 text-xs">
             <div className="flex items-center gap-2.5 min-w-0">
               <span className="px-2.5 py-1 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-mono font-semibold shrink-0">
                 PRIVATE LINK
               </span>
               <span className="font-mono text-slate-300 truncate">
-                https://checkout.xperiserv.in/pay/{privateLinkToken}
+                https://checkout.xperiserv.in/pay/{privateLinkToken || '<token>'}
               </span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-slate-400">Switch Demo Purchase Link:</span>
-              {(paymentLinks.length > 0
-                ? paymentLinks
-                : [
-                    {
-                      linkToken: 'plk_live_bfsi_enclave_9a8f7e6d5c4b3a21',
-                      title: 'Active Multi-Use Link',
-                      status: 'Active',
-                    },
-                    {
-                      linkToken: 'plk_live_hsm_appliance_4c3b2a1908f7e6d5',
-                      title: 'Active Single-Use + Shipping',
-                      status: 'Active',
-                    },
-                    {
-                      linkToken: 'plk_expired_legacy_audit_1122334455667788',
-                      title: 'Expired Link Demo',
-                      status: 'Expired',
-                    },
-                  ]
-              ).map((pl: any) => (
-                <button
-                  key={pl.linkToken}
-                  type="button"
-                  onClick={() => setPrivateLinkToken(pl.linkToken)}
-                  className={`px-2.5 py-1 rounded-md font-mono text-[11px] border transition-colors ${
-                    privateLinkToken === pl.linkToken
-                      ? 'bg-emerald-600 text-white border-emerald-500'
-                      : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700'
-                  }`}
-                >
-                  {pl.status === 'Expired' || pl.status === 'Revoked'
-                    ? `[${pl.status}] `
-                    : ''}
-                  {pl.title?.slice(0, 26) || pl.linkToken.slice(0, 16)}
-                </button>
-              ))}
+              {paymentLinks.length > 0 ? (
+                <>
+                  <span className="text-slate-400">Select Purchase Link:</span>
+                  {paymentLinks.map((pl: any) => (
+                    <button
+                      key={pl.linkToken}
+                      type="button"
+                      onClick={() => setPrivateLinkToken(pl.linkToken)}
+                      className={`px-2.5 py-1 rounded-md font-mono text-[11px] border transition-colors ${
+                        privateLinkToken === pl.linkToken
+                          ? 'bg-emerald-600 text-white border-emerald-500'
+                          : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      {pl.status === 'Expired' || pl.status === 'Revoked'
+                        ? `[${pl.status}] `
+                        : ''}
+                      {pl.title?.slice(0, 26) || pl.linkToken.slice(0, 16)}
+                    </button>
+                  ))}
+                </>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={privateLinkToken}
+                    onChange={(e) => setPrivateLinkToken(e.target.value.trim())}
+                    placeholder="Enter /pay/ token..."
+                    className="bg-slate-950 border border-slate-800 rounded-md px-3 py-1 font-mono text-xs text-slate-200 w-64"
+                  />
+                </div>
+              )}
             </div>
           </div>
 
@@ -614,15 +599,6 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                 </div>
               </div>
               <div className="flex items-center justify-center gap-3">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setPrivateLinkToken('plk_live_bfsi_enclave_9a8f7e6d5c4b3a21')
-                  }
-                  className="px-4 py-2 text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg"
-                >
-                  Open Active Private Link Demo
-                </button>
                 <button
                   type="button"
                   onClick={() => setPortalMode('TRACK_ORDER')}
@@ -1333,44 +1309,56 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              {publicProductsOnly.map((prd: any) => {
-                const isCurrentProduct = items.some((i) => i.sku === prd.sku);
-                const isActivating = activatingProductId === prd.id;
-                return (
-                  <button
-                    key={prd.id}
-                    type="button"
-                    disabled={isActivating}
-                    onClick={() => handleActivateProductCheckout(prd)}
-                    className={`text-left p-4 rounded-xl border transition-colors flex flex-col justify-between gap-3 ${
-                      isCurrentProduct
-                        ? 'bg-emerald-950/25 border-emerald-500 text-white'
-                        : 'bg-slate-900 border-slate-800 text-slate-200 hover:border-slate-700'
-                    }`}
-                  >
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
-                        <span>{prd.sku}</span>
-                        {isCurrentProduct && (
-                          <span className="text-emerald-400 font-semibold">Active</span>
-                        )}
+            {publicProductsOnly.length === 0 ? (
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-8 text-center space-y-2">
+                <div className="text-sm font-semibold text-white">
+                  No Public Catalogue Products Published Yet
+                </div>
+                <p className="text-xs text-slate-400">
+                  Create a public product in the Admin Portal or use a dedicated{' '}
+                  <span className="font-mono text-emerald-400">/pay/:token</span> private purchase link.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                {publicProductsOnly.map((prd: any) => {
+                  const isCurrentProduct = items.some((i) => i.sku === prd.sku);
+                  const isActivating = activatingProductId === prd.id;
+                  return (
+                    <button
+                      key={prd.id}
+                      type="button"
+                      disabled={isActivating}
+                      onClick={() => handleActivateProductCheckout(prd)}
+                      className={`text-left p-4 rounded-xl border transition-colors flex flex-col justify-between gap-3 ${
+                        isCurrentProduct
+                          ? 'bg-emerald-950/25 border-emerald-500 text-white'
+                          : 'bg-slate-900 border-slate-800 text-slate-200 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
+                          <span>{prd.sku}</span>
+                          {isCurrentProduct && (
+                            <span className="text-emerald-400 font-semibold">Active</span>
+                          )}
+                        </div>
+                        <div className="text-xs font-bold text-white line-clamp-2">{prd.name}</div>
+                        <p className="text-[11px] text-slate-400 line-clamp-2">{prd.description}</p>
                       </div>
-                      <div className="text-xs font-bold text-white line-clamp-2">{prd.name}</div>
-                      <p className="text-[11px] text-slate-400 line-clamp-2">{prd.description}</p>
-                    </div>
-                    <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between">
-                      <span className="font-mono tabular-nums text-sm font-bold text-emerald-400">
-                        {formatINR(prd.unitPricePaise)}
-                      </span>
-                      <span className="text-[11px] font-medium text-slate-300">
-                        {isActivating ? 'Activating...' : 'Click to Checkout →'}
-                      </span>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
+                      <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between">
+                        <span className="font-mono tabular-nums text-sm font-bold text-emerald-400">
+                          {formatINR(prd.unitPricePaise)}
+                        </span>
+                        <span className="text-[11px] font-medium text-slate-300">
+                          {isActivating ? 'Activating...' : 'Click to Checkout →'}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </section>
 
           {/* Active Checkout Session Grid */}
@@ -1777,27 +1765,6 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                       <div className="text-[11px] font-mono text-slate-500 pl-6">
                         Policy Version: {XPERISERV_POLICY_VERSION} · Stored with order for audit
                         compliance
-                      </div>
-                    </div>
-
-                    {/* Sandbox Verification Outcome Selector */}
-                    <div className="pt-2 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
-                      <span className="text-slate-400">Gateway Callback Verification Mode:</span>
-                      <div className="flex items-center gap-2">
-                        {(['SUCCESS', 'PENDING', 'FAILURE'] as const).map((mode) => (
-                          <button
-                            key={mode}
-                            type="button"
-                            onClick={() => setSimulateOutcome(mode)}
-                            className={`px-2.5 py-1 rounded font-mono text-[11px] border ${
-                              simulateOutcome === mode
-                                ? 'bg-slate-800 text-white border-slate-600'
-                                : 'bg-slate-950 text-slate-400 border-slate-800'
-                            }`}
-                          >
-                            {mode}
-                          </button>
-                        ))}
                       </div>
                     </div>
 
