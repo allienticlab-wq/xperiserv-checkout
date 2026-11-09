@@ -948,20 +948,156 @@ app.post('/api/v1/pay/:token/checkout', async (req, res) => {
   }
 });
 
+// Save Mailgun SMTP Configuration (including SMTP Password) to PostgreSQL
+app.post('/api/v1/notifications/mailgun-config', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    await ensureSeeded();
+    const {
+      smtpHost,
+      smtpPort,
+      mailgunDomain,
+      smtpUser,
+      smtpPassword,
+      smtpFrom,
+      testRecipient,
+    } = req.body;
+
+    const existingRows = await db
+      .select()
+      .from(systemSettings)
+      .where(eq(systemSettings.settingKey, 'mailgun_smtp_config'));
+
+    let prevConfig: any = {};
+    if (existingRows[0]) {
+      try {
+        prevConfig = JSON.parse(existingRows[0].settingValueJson);
+      } catch {
+        prevConfig = {};
+      }
+    }
+
+    const updatedConfig = {
+      smtpHost: (smtpHost || prevConfig.smtpHost || 'smtp.mailgun.org').trim(),
+      smtpPort: (smtpPort || prevConfig.smtpPort || '587').toString().trim(),
+      mailgunDomain: (mailgunDomain || prevConfig.mailgunDomain || 'mg.xperiserv.in').trim(),
+      smtpUser: (smtpUser || prevConfig.smtpUser || 'postmaster@mg.xperiserv.in').trim(),
+      smtpPassword:
+        smtpPassword !== undefined ? smtpPassword : prevConfig.smtpPassword || process.env.SMTP_PASSWORD || '',
+      smtpFrom: (
+        smtpFrom ||
+        prevConfig.smtpFrom ||
+        'Allientic Checkout <checkout@mg.xperiserv.in>'
+      ).trim(),
+      testRecipient: (testRecipient || prevConfig.testRecipient || 'admin@xperiserv.in').trim(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (existingRows[0]) {
+      await db
+        .update(systemSettings)
+        .set({
+          settingValueJson: JSON.stringify(updatedConfig),
+          updatedAt: new Date(),
+        })
+        .where(eq(systemSettings.id, existingRows[0].id));
+    } else {
+      await db.insert(systemSettings).values({
+        settingKey: 'mailgun_smtp_config',
+        settingValueJson: JSON.stringify(updatedConfig),
+      });
+    }
+
+    await db.insert(auditLogs).values({
+      actorEmail: req.dbUser?.email || 'admin@xperiserv.in',
+      actorRole: 'Super Administrator',
+      action: 'mailgun.config_updated',
+      resourceType: 'SystemSetting',
+      resourceId: 'mailgun_smtp_config',
+      detailsJson: JSON.stringify({
+        smtpHost: updatedConfig.smtpHost,
+        smtpPort: updatedConfig.smtpPort,
+        mailgunDomain: updatedConfig.mailgunDomain,
+        smtpUser: updatedConfig.smtpUser,
+        hasPassword: Boolean(updatedConfig.smtpPassword),
+      }),
+      ipAddress: req.ip || '127.0.0.1',
+    });
+
+    res.json({
+      saved: true,
+      mailgunConfig: {
+        ...updatedConfig,
+        hasPasswordConfigured: Boolean(updatedConfig.smtpPassword),
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to save Mailgun configuration' });
+  }
+});
+
 // Mailgun SMTP Test Dispatch Endpoint
 app.post('/api/v1/notifications/mailgun-test', optionalAuth, async (req: AuthRequest, res) => {
   try {
-    const { recipientEmail, mailgunDomain, smtpHost } = req.body;
-    const targetEmail = recipientEmail || req.dbUser?.email || 'swayamsiddhantn@gmail.com';
+    const {
+      recipientEmail,
+      mailgunDomain,
+      smtpHost,
+      smtpPort,
+      smtpUser,
+      smtpPassword,
+      smtpFrom,
+    } = req.body;
+
+    // Also persist if credentials were provided during test
+    if (smtpHost || smtpUser || smtpPassword !== undefined) {
+      const existingRows = await db
+        .select()
+        .from(systemSettings)
+        .where(eq(systemSettings.settingKey, 'mailgun_smtp_config'));
+      let prevConfig: any = {};
+      if (existingRows[0]) {
+        try {
+          prevConfig = JSON.parse(existingRows[0].settingValueJson);
+        } catch {
+          prevConfig = {};
+        }
+      }
+      const nextCfg = {
+        smtpHost: smtpHost || prevConfig.smtpHost || 'smtp.mailgun.org',
+        smtpPort: smtpPort || prevConfig.smtpPort || '587',
+        mailgunDomain: mailgunDomain || prevConfig.mailgunDomain || 'mg.xperiserv.in',
+        smtpUser: smtpUser || prevConfig.smtpUser || 'postmaster@mg.xperiserv.in',
+        smtpPassword:
+          smtpPassword !== undefined && smtpPassword !== ''
+            ? smtpPassword
+            : prevConfig.smtpPassword || process.env.SMTP_PASSWORD || '',
+        smtpFrom:
+          smtpFrom || prevConfig.smtpFrom || 'Allientic Checkout <checkout@mg.xperiserv.in>',
+        testRecipient: recipientEmail || prevConfig.testRecipient || 'admin@xperiserv.in',
+      };
+      if (existingRows[0]) {
+        await db
+          .update(systemSettings)
+          .set({ settingValueJson: JSON.stringify(nextCfg), updatedAt: new Date() })
+          .where(eq(systemSettings.id, existingRows[0].id));
+      } else {
+        await db.insert(systemSettings).values({
+          settingKey: 'mailgun_smtp_config',
+          settingValueJson: JSON.stringify(nextCfg),
+        });
+      }
+    }
+
+    const targetEmail = recipientEmail || req.dbUser?.email || 'admin@xperiserv.in';
     const logged = await NotificationService.sendAndLog({
       eventType: 'payment.success',
       recipientEmail: targetEmail,
       customerName: 'Allientic Admin (Mailgun SMTP Verification)',
-      orderNumber: 'ALT-ORD-2026-1001',
-      amountFormatted: '₹67,850.00',
+      orderNumber: `MG-VERIFY-${new Date().getFullYear()}`,
+      amountFormatted: '₹1.00',
       transactionId: `MG-SMTP-${Date.now().toString(36).toUpperCase()}`,
       gatewayName: 'PayU India / Zoho Payments',
-      extraNote: `Dispatched via Mailgun SMTP (${smtpHost || 'smtp.mailgun.org'}:587 · Domain: ${mailgunDomain || 'mg.xperiserv.in'}).`,
+      extraNote: `Dispatched via Mailgun SMTP (${smtpHost || 'smtp.mailgun.org'}:${smtpPort || '587'} · Login: ${smtpUser || 'postmaster@mg.xperiserv.in'} · Domain: ${mailgunDomain || 'mg.xperiserv.in'} · Auth: ${smtpPassword ? 'SMTP Password Verified' : 'Configured'}).`,
     });
     res.json({ notification: logged });
   } catch (error: any) {

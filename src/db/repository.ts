@@ -561,6 +561,30 @@ export async function getPlatformSnapshot() {
     const publicProducts = allProducts.filter((p) => !p.isPrivate);
     const privateProducts = allProducts.filter((p) => p.isPrivate);
 
+    const platformSettingRow = allSettings.find((s) => s.settingKey === 'platform_config') || allSettings[0];
+    const mailgunSettingRow = allSettings.find((s) => s.settingKey === 'mailgun_smtp_config');
+    let savedMailgunConfig: any = null;
+    if (mailgunSettingRow) {
+      try {
+        const parsed = JSON.parse(mailgunSettingRow.settingValueJson);
+        savedMailgunConfig = {
+          smtpHost: parsed.smtpHost || process.env.SMTP_HOST || 'smtp.mailgun.org',
+          smtpPort: parsed.smtpPort || process.env.SMTP_PORT || '587',
+          mailgunDomain: parsed.mailgunDomain || process.env.MAILGUN_DOMAIN || 'mg.xperiserv.in',
+          smtpUser: parsed.smtpUser || process.env.SMTP_USER || 'postmaster@mg.xperiserv.in',
+          smtpPassword: parsed.smtpPassword || process.env.SMTP_PASSWORD || '',
+          hasPasswordConfigured: Boolean(parsed.smtpPassword || process.env.SMTP_PASSWORD),
+          smtpFrom:
+            parsed.smtpFrom ||
+            process.env.SMTP_FROM ||
+            'Allientic Checkout <checkout@mg.xperiserv.in>',
+          testRecipient: parsed.testRecipient || 'admin@xperiserv.in',
+        };
+      } catch {
+        savedMailgunConfig = null;
+      }
+    }
+
     return {
       orders: allOrders,
       payments: allPayments,
@@ -580,7 +604,17 @@ export async function getPlatformSnapshot() {
       notifications: allNotifications,
       teamMembers: allUsers,
       auditLogs: allAuditLogs,
-      settings: allSettings[0] ? JSON.parse(allSettings[0].settingValueJson) : {},
+      settings: platformSettingRow ? JSON.parse(platformSettingRow.settingValueJson) : {},
+      mailgunConfig: savedMailgunConfig || {
+        smtpHost: process.env.SMTP_HOST || 'smtp.mailgun.org',
+        smtpPort: process.env.SMTP_PORT || '587',
+        mailgunDomain: process.env.MAILGUN_DOMAIN || 'mg.xperiserv.in',
+        smtpUser: process.env.SMTP_USER || 'postmaster@mg.xperiserv.in',
+        smtpPassword: process.env.SMTP_PASSWORD || '',
+        hasPasswordConfigured: Boolean(process.env.SMTP_PASSWORD),
+        smtpFrom: process.env.SMTP_FROM || 'Allientic Checkout <checkout@mg.xperiserv.in>',
+        testRecipient: 'admin@xperiserv.in',
+      },
     };
   } catch (error) {
     console.error('Database query failed in getPlatformSnapshot:', error);

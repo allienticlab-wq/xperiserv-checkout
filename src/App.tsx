@@ -239,9 +239,12 @@ export default function App() {
     smtpPort: '587',
     mailgunDomain: 'mg.xperiserv.in',
     smtpUser: 'postmaster@mg.xperiserv.in',
+    smtpPassword: '',
     smtpFrom: 'Allientic Checkout <checkout@mg.xperiserv.in>',
     testRecipient: 'admin@xperiserv.in',
   });
+  const [showMailgunPassword, setShowMailgunPassword] = useState<boolean>(false);
+  const [savingMailgunConfig, setSavingMailgunConfig] = useState<boolean>(false);
   const [sendingMailgunTest, setSendingMailgunTest] = useState<boolean>(false);
   const [securityTestResults, setSecurityTestResults] = useState<Array<{
     name: string;
@@ -296,6 +299,18 @@ export default function App() {
         throw new Error(data.error || 'Failed to load platform data');
       }
       setSnapshot(data);
+      if (data.mailgunConfig) {
+        setMailgunConfig((prev) => ({
+          ...prev,
+          smtpHost: data.mailgunConfig.smtpHost || prev.smtpHost,
+          smtpPort: data.mailgunConfig.smtpPort || prev.smtpPort,
+          mailgunDomain: data.mailgunConfig.mailgunDomain || prev.mailgunDomain,
+          smtpUser: data.mailgunConfig.smtpUser || prev.smtpUser,
+          smtpPassword: data.mailgunConfig.smtpPassword ?? prev.smtpPassword,
+          smtpFrom: data.mailgunConfig.smtpFrom || prev.smtpFrom,
+          testRecipient: data.mailgunConfig.testRecipient || prev.testRecipient,
+        }));
+      }
     } catch (err: any) {
       setLoadError(err.message || 'Unable to load platform snapshot');
     } finally {
@@ -837,6 +852,29 @@ export default function App() {
     }
   };
 
+  const handleSaveMailgunConfig = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setSavingMailgunConfig(true);
+    try {
+      const res = await fetch('/api/v1/notifications/mailgun-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(mailgunConfig),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        await fetchPlatformData();
+        showToast(
+          `Saved Mailgun SMTP settings & password (${mailgunConfig.smtpUser} @ ${mailgunConfig.smtpHost}:${mailgunConfig.smtpPort})`
+        );
+      } else {
+        showToast(data.error || 'Failed to save Mailgun settings');
+      }
+    } finally {
+      setSavingMailgunConfig(false);
+    }
+  };
+
   const handleSendMailgunTest = async () => {
     setSendingMailgunTest(true);
     try {
@@ -847,12 +885,16 @@ export default function App() {
           recipientEmail: mailgunConfig.testRecipient,
           mailgunDomain: mailgunConfig.mailgunDomain,
           smtpHost: mailgunConfig.smtpHost,
+          smtpPort: mailgunConfig.smtpPort,
+          smtpUser: mailgunConfig.smtpUser,
+          smtpPassword: mailgunConfig.smtpPassword,
+          smtpFrom: mailgunConfig.smtpFrom,
         }),
       });
       if (res.ok) {
         await fetchPlatformData();
         showToast(
-          `Dispatched test email via Mailgun SMTP (${mailgunConfig.smtpHost}:587) to ${mailgunConfig.testRecipient}`
+          `Dispatched test email via Mailgun SMTP (${mailgunConfig.smtpHost}:${mailgunConfig.smtpPort}) to ${mailgunConfig.testRecipient}`
         );
       }
     } finally {
@@ -2877,17 +2919,37 @@ export default function App() {
               {activeSection === 'notifications' && (
                 <div className="space-y-6">
                   {/* Mailgun SMTP Configuration & Test Bar */}
-                  <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4 text-xs">
+                  <form
+                    onSubmit={handleSaveMailgunConfig}
+                    className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4 text-xs"
+                  >
                     <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
                       <div>
-                        <h2 className="text-base font-bold text-white">
-                          Mailgun SMTP Transactional Mailer Configuration
+                        <h2 className="text-base font-bold text-white flex items-center gap-2">
+                          <span>Mailgun SMTP Transactional Mailer Configuration</span>
+                          <span
+                            className={`px-2 py-0.5 text-[10px] font-mono rounded border ${
+                              mailgunConfig.smtpPassword
+                                ? 'bg-emerald-950 text-emerald-300 border-emerald-500/30'
+                                : 'bg-amber-950 text-amber-300 border-amber-500/30'
+                            }`}
+                          >
+                            {mailgunConfig.smtpPassword ? 'SMTP Password Set' : 'Password Required'}
+                          </span>
                         </h2>
-                        <p className="text-slate-400">
-                          Configured with Mailgun SMTP relay (<span className="font-mono text-emerald-400">smtp.mailgun.org:587</span> · Domain: <span className="font-mono text-slate-200">{mailgunConfig.mailgunDomain}</span>)
+                        <p className="text-slate-400 mt-0.5">
+                          Configured with Mailgun SMTP relay (
+                          <span className="font-mono text-emerald-400">
+                            {mailgunConfig.smtpHost}:{mailgunConfig.smtpPort}
+                          </span>{' '}
+                          · Domain:{' '}
+                          <span className="font-mono text-slate-200">
+                            {mailgunConfig.mailgunDomain}
+                          </span>
+                          )
                         </p>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <input
                           type="email"
                           value={mailgunConfig.testRecipient}
@@ -2895,8 +2957,15 @@ export default function App() {
                             setMailgunConfig({ ...mailgunConfig, testRecipient: e.target.value })
                           }
                           placeholder="Recipient email for Mailgun test"
-                          className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 w-60"
+                          className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 w-56"
                         />
+                        <button
+                          type="submit"
+                          disabled={savingMailgunConfig}
+                          className="px-4 py-2 font-semibold bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/40 rounded-lg whitespace-nowrap"
+                        >
+                          {savingMailgunConfig ? 'Saving...' : 'Save Mailgun Credentials'}
+                        </button>
                         <button
                           type="button"
                           disabled={sendingMailgunTest}
@@ -2908,7 +2977,7 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                       <div>
                         <label className="block text-slate-400 mb-1">Mailgun SMTP Host</label>
                         <input
@@ -2917,6 +2986,7 @@ export default function App() {
                           onChange={(e) =>
                             setMailgunConfig({ ...mailgunConfig, smtpHost: e.target.value })
                           }
+                          placeholder="smtp.mailgun.org"
                           className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
                         />
                       </div>
@@ -2928,6 +2998,7 @@ export default function App() {
                           onChange={(e) =>
                             setMailgunConfig({ ...mailgunConfig, smtpPort: e.target.value })
                           }
+                          placeholder="587"
                           className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
                         />
                       </div>
@@ -2939,22 +3010,63 @@ export default function App() {
                           onChange={(e) =>
                             setMailgunConfig({ ...mailgunConfig, mailgunDomain: e.target.value })
                           }
+                          placeholder="mg.xperiserv.in"
                           className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
                         />
                       </div>
                       <div>
-                        <label className="block text-slate-400 mb-1">Mailgun SMTP Login</label>
+                        <label className="block text-slate-400 mb-1">
+                          Mailgun SMTP Login (Username)
+                        </label>
                         <input
                           type="text"
                           value={mailgunConfig.smtpUser}
                           onChange={(e) =>
                             setMailgunConfig({ ...mailgunConfig, smtpUser: e.target.value })
                           }
+                          placeholder="postmaster@mg.xperiserv.in"
+                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-slate-300 font-medium">
+                            Mailgun SMTP Password *
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => setShowMailgunPassword((v) => !v)}
+                            className="text-[11px] font-mono text-emerald-400 hover:underline"
+                          >
+                            {showMailgunPassword ? 'Hide' : 'Show'}
+                          </button>
+                        </div>
+                        <input
+                          type={showMailgunPassword ? 'text' : 'password'}
+                          value={mailgunConfig.smtpPassword}
+                          onChange={(e) =>
+                            setMailgunConfig({ ...mailgunConfig, smtpPassword: e.target.value })
+                          }
+                          placeholder="Enter Mailgun SMTP password..."
+                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:border-emerald-500 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-400 mb-1">
+                          Sender From Address (SMTP_FROM)
+                        </label>
+                        <input
+                          type="text"
+                          value={mailgunConfig.smtpFrom}
+                          onChange={(e) =>
+                            setMailgunConfig({ ...mailgunConfig, smtpFrom: e.target.value })
+                          }
+                          placeholder="Allientic Checkout <checkout@mg.xperiserv.in>"
                           className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
                         />
                       </div>
                     </div>
-                  </div>
+                  </form>
 
                   <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                     <div className="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
