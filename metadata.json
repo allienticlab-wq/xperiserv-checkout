@@ -1,0 +1,6 @@
+{
+  "name": "Allientic Checkout",
+  "description": "Production-grade self-hosted payment checkout, multi-gateway orchestration (PayU India & Zoho Payments), order management, and financial reconciliation platform for Allientic Lab Technologies.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
