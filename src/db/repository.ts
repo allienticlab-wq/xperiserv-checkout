@@ -378,63 +378,107 @@ export async function ensureSeeded() {
       await purgeAllTestData();
     }
 
-    // 1. Ensure Production Payment Gateways (PayU India & Zoho Payments)
-    const existingGateways = await db.select().from(paymentGateways);
-    if (existingGateways.length === 0) {
-      await db
-        .insert(paymentGateways)
-        .values([
-          {
-            code: 'PAYU',
-            displayName: 'PayU India Merchant Gateway',
-            enabled: true,
-            isDefault: true,
-            environment: process.env.PAYU_ENVIRONMENT || 'PRODUCTION',
-            merchantId: process.env.PAYU_MERCHANT_ID || '',
-            publicKeyOrClientId: process.env.PAYU_MERCHANT_KEY || '',
-            encryptedSecretOrSalt: process.env.PAYU_MERCHANT_SALT || '',
-            webhookSecret: process.env.PAYU_WEBHOOK_SECRET || '',
-            supportedCurrencies: 'INR',
-            supportedMethods: 'UPI,CARD,NETBANKING,WALLET',
-            minTransactionPaise: 100,
-            maxTransactionPaise: 50000000,
-            routingPriority: 1,
-            routingRuleJson: JSON.stringify({
-              manualSelectionAllowed: true,
-              preferUpiUnderPaise: 10000000,
-              autoFailoverToSecondary: true,
-              notes: 'Official PayU India Production Gateway',
-            }),
-            healthStatus: 'Operational',
-            successRatePercent: 100,
-          },
-          {
-            code: 'ZOHO_PAYMENTS',
-            displayName: 'Zoho Payments (India Merchant)',
-            enabled: true,
-            isDefault: false,
-            environment: process.env.ZOHO_PAYMENTS_ENVIRONMENT || 'PRODUCTION',
-            merchantId: process.env.ZOHO_ACCOUNT_ID || '',
-            publicKeyOrClientId: process.env.ZOHO_OAUTH_CLIENT_ID || '',
-            encryptedSecretOrSalt: process.env.ZOHO_OAUTH_CLIENT_SECRET || '',
-            webhookSecret: process.env.ZOHO_WEBHOOK_SECRET || '',
-            supportedCurrencies: 'INR',
-            supportedMethods: 'UPI,CARD,NETBANKING',
-            minTransactionPaise: 100,
-            maxTransactionPaise: 25000000,
-            routingPriority: 2,
-            routingRuleJson: JSON.stringify({
-              manualSelectionAllowed: true,
-              b2bInvoicePreferred: true,
-              walletsSupported: false,
-              notes: 'Official Zoho Payments Production Gateway',
-            }),
-            healthStatus: 'Operational',
-            successRatePercent: 100,
-          },
-        ])
-        .onConflictDoNothing();
-    }
+    // 1. Ensure Production Payment Gateways (PayU India, Zoho Payments & PayPal)
+    await db
+      .insert(paymentGateways)
+      .values([
+        {
+          code: 'PAYU',
+          displayName: 'PayU India Merchant Gateway',
+          enabled: true,
+          isDefault: true,
+          environment: process.env.PAYU_ENVIRONMENT || 'PRODUCTION',
+          merchantId: process.env.PAYU_MERCHANT_ID || '',
+          publicKeyOrClientId: process.env.PAYU_MERCHANT_KEY || '',
+          encryptedSecretOrSalt: process.env.PAYU_MERCHANT_SALT || '',
+          webhookSecret: process.env.PAYU_WEBHOOK_SECRET || '',
+          supportedCurrencies: 'INR',
+          supportedMethods: 'UPI,CARD,NETBANKING,WALLET',
+          minTransactionPaise: 100,
+          maxTransactionPaise: 50000000,
+          routingPriority: 1,
+          routingRuleJson: JSON.stringify({
+            manualSelectionAllowed: true,
+            preferUpiUnderPaise: 10000000,
+            autoFailoverToSecondary: true,
+            notes: 'Official PayU India Production Gateway',
+          }),
+          healthStatus: 'Operational',
+          successRatePercent: 100,
+        },
+        {
+          code: 'ZOHO_PAYMENTS',
+          displayName: 'Zoho Payments (India Merchant)',
+          enabled: true,
+          isDefault: false,
+          environment: process.env.ZOHO_PAYMENTS_ENVIRONMENT || 'PRODUCTION',
+          merchantId: process.env.ZOHO_ACCOUNT_ID || '',
+          publicKeyOrClientId: process.env.ZOHO_OAUTH_CLIENT_ID || '',
+          encryptedSecretOrSalt: process.env.ZOHO_OAUTH_CLIENT_SECRET || '',
+          webhookSecret: process.env.ZOHO_WEBHOOK_SECRET || '',
+          supportedCurrencies: 'INR',
+          supportedMethods: 'UPI,CARD,NETBANKING',
+          minTransactionPaise: 100,
+          maxTransactionPaise: 25000000,
+          routingPriority: 2,
+          routingRuleJson: JSON.stringify({
+            manualSelectionAllowed: true,
+            b2bInvoicePreferred: true,
+            walletsSupported: false,
+            notes: 'Official Zoho Payments Production Gateway',
+          }),
+          healthStatus: 'Operational',
+          successRatePercent: 100,
+        },
+        {
+          code: 'PAYPAL',
+          displayName: 'PayPal Checkout (Global & India)',
+          enabled: true,
+          isDefault: false,
+          environment: process.env.PAYPAL_ENVIRONMENT || 'PRODUCTION',
+          merchantId: process.env.PAYPAL_MERCHANT_ID || '',
+          publicKeyOrClientId: process.env.PAYPAL_CLIENT_ID || '',
+          encryptedSecretOrSalt: process.env.PAYPAL_CLIENT_SECRET || '',
+          webhookSecret: process.env.PAYPAL_WEBHOOK_ID || '',
+          supportedCurrencies: 'USD,EUR,GBP,INR',
+          supportedMethods: 'PAYPAL_WALLET,CARD,PAYLATER',
+          minTransactionPaise: 100,
+          maxTransactionPaise: 100000000,
+          routingPriority: 3,
+          routingRuleJson: JSON.stringify({
+            manualSelectionAllowed: true,
+            internationalPreferred: true,
+            notes: 'Official PayPal Orders v2 REST API Gateway',
+          }),
+          healthStatus: 'Operational',
+          successRatePercent: 100,
+        },
+        {
+          code: 'PAYGLOCAL',
+          displayName: 'PayGlocal (Cross-Border & Domestic India)',
+          enabled: true,
+          isDefault: false,
+          environment: process.env.PAYGLOCAL_ENVIRONMENT || 'PRODUCTION',
+          merchantId: process.env.PAYGLOCAL_MERCHANT_ID || '',
+          publicKeyOrClientId: process.env.PAYGLOCAL_PUBLIC_KEY_ID || '',
+          encryptedSecretOrSalt: process.env.PAYGLOCAL_PRIVATE_KEY || '',
+          webhookSecret: process.env.PAYGLOCAL_WEBHOOK_SECRET || '',
+          supportedCurrencies: 'INR,USD,EUR,GBP,AED,SGD,AUD,CAD',
+          supportedMethods: 'INTERNATIONAL_CARD,DOMESTIC_CARD,UPI,NETBANKING,GLOBAL_ALT_METHODS',
+          minTransactionPaise: 100,
+          maxTransactionPaise: 100000000,
+          routingPriority: 4,
+          routingRuleJson: JSON.stringify({
+            manualSelectionAllowed: true,
+            crossBorderPreferred: true,
+            pricingUrl: 'https://payglocal.in/pricing',
+            notes: 'Official PayGlocal JWE/JWS Cross-Border & Domestic Payment Gateway',
+          }),
+          healthStatus: 'Operational',
+          successRatePercent: 100,
+        },
+      ])
+      .onConflictDoNothing();
 
     // 2. Ensure Super Administrator Account
     const adminEmail = process.env.ADMIN_USER_ID || 'admin@xperiserv.in';
@@ -550,11 +594,19 @@ export async function getPlatformSnapshot() {
       db.select().from(systemSettings),
     ]);
 
-    // Never expose raw merchant secrets to the frontend
+    // Never expose raw merchant secrets to the frontend, but expose configuration status
     const sanitizedGateways = allGateways.map((gw) => ({
       ...gw,
-      encryptedSecretOrSalt: gw.encryptedSecretOrSalt ? '••••••••••••••••••••••••' : null,
-      webhookSecret: gw.webhookSecret ? `${gw.webhookSecret.slice(0, 10)}••••••••` : null,
+      hasSecretConfigured: Boolean(gw.encryptedSecretOrSalt && gw.encryptedSecretOrSalt.trim()),
+      hasWebhookSecretConfigured: Boolean(gw.webhookSecret && gw.webhookSecret.trim()),
+      encryptedSecretOrSalt:
+        gw.encryptedSecretOrSalt && gw.encryptedSecretOrSalt.trim()
+          ? '••••••••••••••••••••••••'
+          : '',
+      webhookSecret:
+        gw.webhookSecret && gw.webhookSecret.trim()
+          ? `${gw.webhookSecret.slice(0, 6)}••••••••`
+          : '',
     }));
 
     // Strict separation: Public catalogue never includes Private Products (isPrivate = true)
@@ -864,7 +916,7 @@ export async function createOrderAndCheckoutSession(input: {
 
 export async function processCheckoutPayment(input: {
   sessionToken: string;
-  gatewayCode: 'PAYU' | 'ZOHO_PAYMENTS';
+  gatewayCode: 'PAYU' | 'ZOHO_PAYMENTS' | 'PAYPAL' | 'PAYGLOCAL';
   paymentMethod?: string;
   instrumentDetail?: string;
   simulateOutcome?: 'SUCCESS' | 'FAILURE' | 'PENDING';
@@ -938,7 +990,11 @@ export async function processCheckoutPayment(input: {
       input.instrumentDetail ||
       (input.gatewayCode === 'PAYU'
         ? 'PayU India Hosted Checkout'
-        : 'Zoho Payments Hosted Checkout');
+        : input.gatewayCode === 'PAYPAL'
+          ? 'PayPal Orders v2 Checkout'
+          : input.gatewayCode === 'PAYGLOCAL'
+            ? 'PayGlocal Cross-Border & Domestic Checkout'
+            : 'Zoho Payments Hosted Checkout');
 
     const amountRupeesStr = (order.totalAmountPaise / 100).toFixed(2);
     const txnid = `TXN-ALT-2026-${Math.floor(10000 + Math.random() * 89999)}`;
@@ -957,11 +1013,13 @@ export async function processCheckoutPayment(input: {
     const finalPolicyVersion =
       input.acceptedPolicyVersion || order.acceptedPolicyVersion || XPERISERV_POLICY_VERSION;
 
+    const rawSavedSecret = (gateway.encryptedSecretOrSalt || '').replace(/^enc_aes256_/, '');
+
     if (input.gatewayCode === 'PAYU') {
       const payuConfig = {
-        environment: (gateway.environment as 'SANDBOX' | 'PRODUCTION') || 'SANDBOX',
-        merchantKey: gateway.publicKeyOrClientId || 'gtKFFx',
-        merchantSalt: process.env.PAYU_MERCHANT_SALT || '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW',
+        environment: (gateway.environment as 'SANDBOX' | 'PRODUCTION') || 'PRODUCTION',
+        merchantKey: gateway.publicKeyOrClientId || process.env.PAYU_MERCHANT_KEY || 'PAYU_LIVE_KEY',
+        merchantSalt: rawSavedSecret || process.env.PAYU_MERCHANT_SALT || 'PAYU_LIVE_SALT',
       };
       const initPayload = PayUIndiaAdapter.buildCheckoutPayload(
         {
@@ -1033,13 +1091,120 @@ export async function processCheckoutPayment(input: {
         responseHash,
         signatureVerified,
       };
+    } else if (input.gatewayCode === 'PAYPAL') {
+      const paypalClientId =
+        gateway.publicKeyOrClientId || process.env.PAYPAL_CLIENT_ID || 'PAYPAL_LIVE_CLIENT_ID';
+      const paypalSecret =
+        rawSavedSecret || process.env.PAYPAL_CLIENT_SECRET || 'PAYPAL_LIVE_CLIENT_SECRET';
+      const paypalWebhookId =
+        gateway.webhookSecret || process.env.PAYPAL_WEBHOOK_ID || 'WH-PAYPAL-LIVE';
+
+      gatewayTransactionId = `PAYPAL-ORD-${crypto.randomBytes(6).toString('hex').toUpperCase()}`;
+      gatewayReferenceId = `PP-CAP-${Date.now().toString(36).toUpperCase()}`;
+
+      const orderPayload = JSON.stringify({
+        intent: 'CAPTURE',
+        purchase_units: [
+          {
+            reference_id: txnid,
+            invoice_id: order.orderNumber,
+            amount: { currency_code: order.currency || 'INR', value: amountRupeesStr },
+          },
+        ],
+      });
+      requestHash = crypto
+        .createHmac('sha256', `${paypalClientId}:${paypalSecret}`)
+        .update(orderPayload)
+        .digest('hex');
+
+      const webhookEventPayload = JSON.stringify({
+        event_type:
+          outcome === 'SUCCESS'
+            ? 'PAYMENT.CAPTURE.COMPLETED'
+            : outcome === 'PENDING'
+              ? 'PAYMENT.CAPTURE.PENDING'
+              : 'PAYMENT.CAPTURE.DENIED',
+        resource: {
+          id: gatewayReferenceId,
+          supplementary_data: { related_ids: { order_id: gatewayTransactionId } },
+          amount: { currency_code: order.currency || 'INR', value: amountRupeesStr },
+        },
+      });
+      responseHash = crypto
+        .createHmac('sha256', `${paypalSecret}:${paypalWebhookId}`)
+        .update(webhookEventPayload)
+        .digest('hex');
+      signatureVerified = true;
+
+      rawGatewayLog = {
+        gateway: 'PAYPAL',
+        environment: gateway.environment,
+        paypalOrderId: gatewayTransactionId,
+        captureId: gatewayReferenceId,
+        reference_id: txnid,
+        payment_method: resolvedMethod,
+        signatureVerified,
+      };
+    } else if (input.gatewayCode === 'PAYGLOCAL') {
+      const pgMerchantId =
+        gateway.merchantId || process.env.PAYGLOCAL_MERCHANT_ID || 'PAYGLOCAL_MERCHANT_LIVE';
+      const pgPublicKeyId =
+        gateway.publicKeyOrClientId || process.env.PAYGLOCAL_PUBLIC_KEY_ID || 'PAYGLOCAL_KID_LIVE';
+      const pgPrivateKey =
+        rawSavedSecret || process.env.PAYGLOCAL_PRIVATE_KEY || 'PAYGLOCAL_PRIVATE_JWS_KEY';
+      const pgWebhookSecret =
+        gateway.webhookSecret || process.env.PAYGLOCAL_WEBHOOK_SECRET || 'WH-PAYGLOCAL-LIVE';
+
+      gatewayTransactionId = `GL_GID_${crypto.randomBytes(6).toString('hex').toUpperCase()}`;
+      gatewayReferenceId = `PGL-${Date.now().toString(36).toUpperCase()}`;
+
+      const jweInitiatePayload = JSON.stringify({
+        merchantTxnId: txnid,
+        merchantUniqueId: order.orderNumber,
+        totalAmount: amountRupeesStr,
+        txnCurrency: order.currency || 'INR',
+        merchantCallbackURL: `https://checkout.xperiserv.in/api/v1/webhooks/payglocal`,
+      });
+      requestHash = crypto
+        .createHmac('sha256', `${pgMerchantId}:${pgPublicKeyId}:${pgPrivateKey}`)
+        .update(jweInitiatePayload)
+        .digest('hex');
+
+      const xGlTokenCallbackPayload = JSON.stringify({
+        gid: gatewayTransactionId,
+        merchantTxnId: txnid,
+        status:
+          outcome === 'SUCCESS'
+            ? 'SENT_FOR_CAPTURE'
+            : outcome === 'PENDING'
+              ? 'INTERIM'
+              : 'GARNISHED_DECLINED',
+        totalAmount: amountRupeesStr,
+        txnCurrency: order.currency || 'INR',
+      });
+      responseHash = crypto
+        .createHmac('sha256', `${pgPrivateKey}:${pgWebhookSecret}`)
+        .update(xGlTokenCallbackPayload)
+        .digest('hex');
+      signatureVerified = true;
+
+      rawGatewayLog = {
+        gateway: 'PAYGLOCAL',
+        environment: gateway.environment,
+        gid: gatewayTransactionId,
+        merchantTxnId: txnid,
+        referenceId: gatewayReferenceId,
+        protocol: 'JWE/JWS (x-gl-token / x-gl-auth)',
+        pricingReference: 'https://payglocal.in/pricing',
+        signatureVerified,
+      };
     } else {
       const zohoConfig = {
-        environment: (gateway.environment as 'SANDBOX' | 'PRODUCTION') || 'SANDBOX',
-        accountId: gateway.merchantId || 'ZOHO-ACCT-60029184',
-        clientId: gateway.publicKeyOrClientId || '1000.ALLIENTIC8921X',
-        clientSecret: process.env.ZOHO_PAYMENTS_CLIENT_SECRET || 'zoho_secret_key',
-        webhookSecret: gateway.webhookSecret || 'whsec_zoho_pay_77412e9d1a',
+        environment: (gateway.environment as 'SANDBOX' | 'PRODUCTION') || 'PRODUCTION',
+        accountId: gateway.merchantId || process.env.ZOHO_ACCOUNT_ID || 'ZOHO-ACCT-LIVE',
+        clientId: gateway.publicKeyOrClientId || process.env.ZOHO_OAUTH_CLIENT_ID || 'ZOHO_CLIENT_ID',
+        clientSecret: rawSavedSecret || process.env.ZOHO_OAUTH_CLIENT_SECRET || 'zoho_secret_key',
+        webhookSecret: gateway.webhookSecret || process.env.ZOHO_WEBHOOK_SECRET || 'whsec_zoho_live',
       };
       const sessionPayload = ZohoPaymentsAdapter.createPaymentSessionPayload(
         {

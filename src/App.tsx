@@ -272,6 +272,36 @@ export default function App() {
     detail: string;
   }> | null>(null);
 
+  // Payment Gateway Credential Editing & Verification State (PayU, Zoho Payments, PayPal)
+  const [gatewayEdits, setGatewayEdits] = useState<
+    Record<
+      string,
+      {
+        environment: string;
+        merchantId: string;
+        publicKeyOrClientId: string;
+        secretOrSalt: string;
+        webhookSecret: string;
+        supportedCurrencies: string;
+        supportedMethods: string;
+      }
+    >
+  >({});
+  const [showGatewaySecret, setShowGatewaySecret] = useState<Record<string, boolean>>({});
+  const [savingGatewayCode, setSavingGatewayCode] = useState<string | null>(null);
+  const [verifyingGatewayCode, setVerifyingGatewayCode] = useState<string | null>(null);
+  const [gatewayVerificationResults, setGatewayVerificationResults] = useState<
+    Record<
+      string,
+      {
+        verified: boolean;
+        message: string;
+        signaturePreview: string;
+        checkedAt: string;
+      }
+    >
+  >({});
+
   // Detect customer-facing URLs (/pay/:token, /track-order, /checkout/:token) automatically on boot
   useEffect(() => {
     const path = window.location.pathname;
@@ -331,6 +361,23 @@ export default function App() {
           smtpFrom: data.mailgunConfig.smtpFrom || prev.smtpFrom,
           testRecipient: data.mailgunConfig.testRecipient || prev.testRecipient,
         }));
+      }
+      if (Array.isArray(data.gateways)) {
+        setGatewayEdits((prev) => {
+          const next = { ...prev };
+          for (const gw of data.gateways) {
+            next[gw.code] = {
+              environment: gw.environment || 'PRODUCTION',
+              merchantId: gw.merchantId || '',
+              publicKeyOrClientId: gw.publicKeyOrClientId || '',
+              secretOrSalt: prev[gw.code]?.secretOrSalt || '',
+              webhookSecret: prev[gw.code]?.webhookSecret || '',
+              supportedCurrencies: gw.supportedCurrencies || 'INR',
+              supportedMethods: gw.supportedMethods || 'UPI,CARD,NETBANKING',
+            };
+          }
+          return next;
+        });
       }
     } catch (err: any) {
       setLoadError(err.message || 'Unable to load platform snapshot');
@@ -494,8 +541,8 @@ export default function App() {
       <CustomerCheckoutPortal
         session={targetSession}
         order={targetOrder}
-        products={snapshot.products || []}
-        paymentLinks={snapshot.paymentLinks || []}
+        products={(snapshot.products || []).filter((p: any) => !p.isPrivate)}
+        paymentLinks={[]}
         gateways={snapshot.gateways || []}
         brandSettings={snapshot.settings || {}}
         initialMode={checkoutPortalMode}
@@ -663,6 +710,12 @@ export default function App() {
   const zohoVolumePaise = successfulPayments
     .filter((p: any) => p.gatewayCode === 'ZOHO_PAYMENTS')
     .reduce((s: number, p: any) => s + p.amountPaise, 0);
+  const paypalVolumePaise = successfulPayments
+    .filter((p: any) => p.gatewayCode === 'PAYPAL')
+    .reduce((s: number, p: any) => s + p.amountPaise, 0);
+  const payglocalVolumePaise = successfulPayments
+    .filter((p: any) => p.gatewayCode === 'PAYGLOCAL')
+    .reduce((s: number, p: any) => s + p.amountPaise, 0);
 
   // Handlers for Admin Operations
   const handleToggleGateway = async (gw: any, field: 'enabled' | 'isDefault' | 'environment', value: any) => {
@@ -678,6 +731,105 @@ export default function App() {
       }
     } catch {
       showToast('Failed to update gateway');
+    }
+  };
+
+  const handleSaveGatewayCredentials = async (gw: any) => {
+    const draft = gatewayEdits[gw.code];
+    if (!draft) return;
+    setSavingGatewayCode(gw.code);
+    try {
+      const payload: Record<string, any> = {
+        environment: draft.environment,
+        merchantId: draft.merchantId,
+        publicKeyOrClientId: draft.publicKeyOrClientId,
+        supportedCurrencies: draft.supportedCurrencies,
+        supportedMethods: draft.supportedMethods,
+      };
+      if (draft.secretOrSalt && draft.secretOrSalt.trim().length > 0) {
+        payload.secretOrSalt = draft.secretOrSalt.trim();
+      }
+      if (draft.webhookSecret && draft.webhookSecret.trim().length > 0) {
+        payload.webhookSecret = draft.webhookSecret.trim();
+      }
+
+      const res = await fetch(`/api/v1/gateways/${gw.code}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        await fetchPlatformData();
+        setGatewayEdits((prev) => ({
+          ...prev,
+          [gw.code]: {
+            ...(prev[gw.code] || draft),
+            secretOrSalt: '',
+            webhookSecret: '',
+          },
+        }));
+        showToast(`Saved ${gw.displayName} keys & configuration`);
+      } else {
+        showToast(data.error || `Failed to update ${gw.displayName}`);
+      }
+    } catch {
+      showToast(`Failed to save ${gw.displayName} credentials`);
+    } finally {
+      setSavingGatewayCode(null);
+    }
+  };
+
+  const handleVerifyGatewayKeys = async (gw: any) => {
+    setVerifyingGatewayCode(gw.code);
+    try {
+      // Save any unsaved edits first so verification tests the latest inputs
+      const draft = gatewayEdits[gw.code];
+      if (draft) {
+        const savePayload: Record<string, any> = {
+          environment: draft.environment,
+          merchantId: draft.merchantId,
+          publicKeyOrClientId: draft.publicKeyOrClientId,
+          supportedCurrencies: draft.supportedCurrencies,
+          supportedMethods: draft.supportedMethods,
+        };
+        if (draft.secretOrSalt && draft.secretOrSalt.trim().length > 0) {
+          savePayload.secretOrSalt = draft.secretOrSalt.trim();
+        }
+        if (draft.webhookSecret && draft.webhookSecret.trim().length > 0) {
+          savePayload.webhookSecret = draft.webhookSecret.trim();
+        }
+        await fetch(`/api/v1/gateways/${gw.code}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(savePayload),
+        });
+      }
+
+      const res = await fetch(`/api/v1/gateways/${gw.code}/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setGatewayVerificationResults((prev) => ({
+          ...prev,
+          [gw.code]: {
+            verified: Boolean(data.verified),
+            message: data.message,
+            signaturePreview: data.signaturePreview,
+            checkedAt: data.checkedAt,
+          },
+        }));
+        await fetchPlatformData();
+        showToast(data.message || `Verified ${gw.displayName}`);
+      } else {
+        showToast(data.error || `Verification failed for ${gw.displayName}`);
+      }
+    } catch {
+      showToast(`Verification check failed for ${gw.displayName}`);
+    } finally {
+      setVerifyingGatewayCode(null);
     }
   };
 
@@ -1161,15 +1313,11 @@ export default function App() {
 
           <div className="flex items-center gap-2.5 shrink-0">
             <button
-              onClick={() => {
-                const activeLink =
-                  paymentLinksList.find((l: any) => l.status === 'Active') || paymentLinksList[0];
-                handleLaunchPrivateLinkCheckout(activeLink?.linkToken || '');
-              }}
+              onClick={() => setActiveSection('payment-links')}
               className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-amber-300 bg-amber-950/50 border border-amber-500/40 rounded-lg hover:bg-amber-900/50 transition-colors whitespace-nowrap shrink-0"
             >
               <Lock className="w-3.5 h-3.5 text-amber-400" />
-              Private Link (/pay/token)
+              Manage Payment Links
             </button>
             <button
               onClick={() => {
@@ -1471,7 +1619,7 @@ export default function App() {
                                 })}
                               </div>
                               <div className="flex items-center justify-between text-xs text-slate-400">
-                                <div className="flex items-center gap-6">
+                                <div className="flex flex-wrap items-center gap-5">
                                   <span className="flex items-center gap-2">
                                     <span className="w-2.5 h-2.5 rounded-xs bg-emerald-500 inline-block" />
                                     PayU India ({formatINR(payuVolumePaise)})
@@ -1479,6 +1627,14 @@ export default function App() {
                                   <span className="flex items-center gap-2">
                                     <span className="w-2.5 h-2.5 rounded-xs bg-sky-500 inline-block" />
                                     Zoho Payments ({formatINR(zohoVolumePaise)})
+                                  </span>
+                                  <span className="flex items-center gap-2">
+                                    <span className="w-2.5 h-2.5 rounded-xs bg-indigo-500 inline-block" />
+                                    PayPal ({formatINR(paypalVolumePaise)})
+                                  </span>
+                                  <span className="flex items-center gap-2">
+                                    <span className="w-2.5 h-2.5 rounded-xs bg-amber-500 inline-block" />
+                                    PayGlocal ({formatINR(payglocalVolumePaise)})
                                   </span>
                                 </div>
                                 <button
@@ -1495,15 +1651,17 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Gateway Health & Routing Status */}
+                    {/* Gateway Health & Quick ON/OFF Switch */}
                     <div className="lg:col-span-4 bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
                       <div className="flex items-center justify-between">
-                        <h2 className="text-sm font-bold text-white">Payment Gateway Health</h2>
+                        <h2 className="text-sm font-bold text-white">
+                          Payment Gateways (ON / OFF)
+                        </h2>
                         <button
                           onClick={() => setActiveSection('gateways')}
                           className="text-xs text-emerald-400 hover:underline"
                         >
-                          Configure
+                          Manage Keys →
                         </button>
                       </div>
 
@@ -1511,29 +1669,58 @@ export default function App() {
                         {gatewaysList.map((gw: any) => (
                           <div
                             key={gw.code}
-                            className="p-3.5 rounded-lg bg-slate-950 border border-slate-800 space-y-2"
+                            className={`p-3.5 rounded-lg border space-y-2 transition-colors ${
+                              gw.enabled
+                                ? 'bg-slate-950 border-slate-800'
+                                : 'bg-slate-950/50 border-slate-900 opacity-75'
+                            }`}
                           >
-                            <div className="flex items-center justify-between">
+                            <div className="flex items-center justify-between gap-2">
                               <span className="text-xs font-semibold text-white">
                                 {gw.displayName}
                               </span>
-                              <span className="text-xs font-mono text-emerald-400">
-                                {gw.enabled ? gw.healthStatus : 'Disabled'}
-                              </span>
+                              <button
+                                type="button"
+                                role="switch"
+                                aria-checked={Boolean(gw.enabled)}
+                                onClick={() => handleToggleGateway(gw, 'enabled', !gw.enabled)}
+                                className="flex items-center gap-2 text-xs font-mono"
+                              >
+                                <span
+                                  className={
+                                    gw.enabled ? 'text-emerald-400 font-semibold' : 'text-slate-500'
+                                  }
+                                >
+                                  {gw.enabled ? 'ON' : 'OFF'}
+                                </span>
+                                <span
+                                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                                    gw.enabled ? 'bg-emerald-500' : 'bg-slate-700'
+                                  }`}
+                                >
+                                  <span
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ease-in-out ${
+                                      gw.enabled ? 'translate-x-4' : 'translate-x-0'
+                                    }`}
+                                  />
+                                </span>
+                              </button>
                             </div>
                             <div className="text-[11px] text-slate-400 flex items-center gap-2">
                               <span>Env: {gw.environment}</span>
                               <span aria-hidden="true">·</span>
-                              <span>Success: {gw.successRatePercent}%</span>
+                              <span>
+                                Status: {gw.enabled ? gw.healthStatus : 'Disabled in Checkout'}
+                              </span>
                               {gw.isDefault && (
                                 <>
                                   <span aria-hidden="true">·</span>
-                                  <span className="text-emerald-400 font-medium">Default Router</span>
+                                  <span className="text-emerald-400 font-medium">Default</span>
                                 </>
                               )}
                             </div>
                             <div className="text-[11px] font-mono text-slate-500">
-                              Methods: {gw.supportedMethods}
+                              Currencies: {gw.supportedCurrencies}
                             </div>
                           </div>
                         ))}
@@ -2357,109 +2544,484 @@ export default function App() {
                 </div>
               )}
 
-              {/* 8. PAYMENT GATEWAYS MANAGEMENT */}
+              {/* 8. PAYMENT GATEWAYS MANAGEMENT (PAYU INDIA, ZOHO PAYMENTS, PAYPAL & PAYGLOCAL) */}
               {activeSection === 'gateways' && (
                 <div className="space-y-6">
-                  <div>
-                    <h2 className="text-base font-bold text-white">
-                      Payment Gateway Orchestration (PayU India &amp; Zoho Payments)
-                    </h2>
-                    <p className="text-xs text-slate-400">
-                      Independently enable/disable providers, switch SANDBOX/PRODUCTION, set
-                      default router, and manage encrypted credentials without code changes
-                    </p>
+                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                      <h2 className="text-base font-bold text-white">
+                        Payment Gateway Orchestration &amp; Credential Editor (PayU India, Zoho Payments, PayPal &amp; PayGlocal)
+                      </h2>
+                      <p className="text-xs text-slate-400">
+                        Turn gateways ON or OFF instantly for Customer Checkout, edit Merchant IDs, Public Keys / Client IDs, Salts / Private Keys, and verify live credentials
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs font-mono text-emerald-400 bg-emerald-950/40 border border-emerald-500/30 px-3 py-1.5 rounded-lg">
+                      <Shield className="w-3.5 h-3.5" />
+                      <span>AES-256 Encrypted Server-Side Vault</span>
+                    </div>
+                  </div>
+
+                  {/* Quick Master ON / OFF Switch Bar for All Payment Gateways */}
+                  <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                          Gateway Master ON / OFF Switches (Live Checkout Visibility)
+                        </h3>
+                        <p className="text-[11px] text-slate-400">
+                          Toggle any payment gateway ON or OFF. Disabled gateways are immediately hidden from Public Storefront and Private Purchase Links (/pay/token).
+                        </p>
+                      </div>
+                      <span className="text-xs font-mono text-emerald-400">
+                        {gatewaysList.filter((g: any) => g.enabled).length} of {gatewaysList.length} Gateways ON
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-1">
+                      {gatewaysList.map((gw: any) => (
+                        <div
+                          key={`switch_${gw.code}`}
+                          className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 transition-colors ${
+                            gw.enabled
+                              ? 'bg-emerald-950/25 border-emerald-500/40'
+                              : 'bg-slate-950 border-slate-800 opacity-75'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-bold text-white truncate">
+                                {gw.code === 'PAYU'
+                                  ? 'PayU India'
+                                  : gw.code === 'ZOHO_PAYMENTS'
+                                  ? 'Zoho Payments'
+                                  : gw.code === 'PAYPAL'
+                                  ? 'PayPal'
+                                  : 'PayGlocal'}
+                              </span>
+                              {gw.isDefault && (
+                                <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">
+                                  DEFAULT
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] font-mono text-slate-400 mt-0.5">
+                              {gw.enabled ? 'ON · Active in Checkout' : 'OFF · Hidden in Checkout'}
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={Boolean(gw.enabled)}
+                            onClick={() => handleToggleGateway(gw, 'enabled', !gw.enabled)}
+                            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                              gw.enabled ? 'bg-emerald-500' : 'bg-slate-700'
+                            }`}
+                            title={`Turn ${gw.displayName} ${gw.enabled ? 'OFF' : 'ON'}`}
+                          >
+                            <span
+                              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                                gw.enabled ? 'translate-x-5' : 'translate-x-0'
+                              }`}
+                            />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
 
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    {gatewaysList.map((gw: any) => (
-                      <div
-                        key={gw.code}
-                        className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4"
-                      >
-                        <div className="flex items-start justify-between border-b border-slate-800 pb-4">
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <h3 className="text-base font-bold text-white">{gw.displayName}</h3>
-                              <span className="text-xs font-mono text-slate-400">({gw.code})</span>
-                            </div>
-                            <p className="text-xs text-slate-400 mt-1">
-                              Health: <span className="text-emerald-400">{gw.healthStatus}</span> ·
-                              Success Rate: <span className="font-mono">{gw.successRatePercent}%</span>
-                            </p>
-                          </div>
+                    {gatewaysList.map((gw: any) => {
+                      const draft = gatewayEdits[gw.code] || {
+                        environment: gw.environment || 'PRODUCTION',
+                        merchantId: gw.merchantId || '',
+                        publicKeyOrClientId: gw.publicKeyOrClientId || '',
+                        secretOrSalt: '',
+                        webhookSecret: '',
+                        supportedCurrencies: gw.supportedCurrencies || 'INR',
+                        supportedMethods: gw.supportedMethods || 'UPI,CARD',
+                      };
+                      const isPayU = gw.code === 'PAYU';
+                      const isZoho = gw.code === 'ZOHO_PAYMENTS';
+                      const isPayPal = gw.code === 'PAYPAL';
+                      const isPayGlocal = gw.code === 'PAYGLOCAL';
+                      const verifyResult = gatewayVerificationResults[gw.code];
 
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => handleToggleGateway(gw, 'enabled', !gw.enabled)}
-                              className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
-                                gw.enabled
-                                  ? 'bg-emerald-600/20 text-emerald-300 border-emerald-500/40'
-                                  : 'bg-slate-800 text-slate-400 border-slate-700'
-                              }`}
-                            >
-                              {gw.enabled ? 'Enabled' : 'Disabled'}
-                            </button>
-                            {!gw.isDefault && (
-                              <button
-                                onClick={() => handleToggleGateway(gw, 'isDefault', true)}
-                                className="px-3 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg"
+                      const shortName = isPayU
+                        ? 'PayU'
+                        : isZoho
+                        ? 'Zoho'
+                        : isPayPal
+                        ? 'PayPal'
+                        : 'PayGlocal';
+
+                      const merchantIdLabel = isPayU
+                        ? 'PayU Merchant ID'
+                        : isZoho
+                        ? 'Zoho Payments Account / Org ID'
+                        : isPayPal
+                        ? 'PayPal Merchant / Account ID'
+                        : 'PayGlocal Merchant ID';
+                      const publicKeyLabel = isPayU
+                        ? 'PayU Merchant Key'
+                        : isZoho
+                        ? 'Zoho OAuth Client ID'
+                        : isPayPal
+                        ? 'PayPal REST API Client ID'
+                        : 'PayGlocal Public Key ID (kid) / API Key';
+                      const secretLabel = isPayU
+                        ? 'PayU Merchant Salt (SHA-512)'
+                        : isZoho
+                        ? 'Zoho Client Secret / Signing Key'
+                        : isPayPal
+                        ? 'PayPal REST API Client Secret'
+                        : 'PayGlocal Private Key / JWS Signing Secret';
+                      const webhookLabel = isPayU
+                        ? 'PayU Webhook Secret'
+                        : isZoho
+                        ? 'Zoho Webhook Signing Secret'
+                        : isPayPal
+                        ? 'PayPal Webhook ID'
+                        : 'PayGlocal Webhook Secret (x-gl-token)';
+
+                      return (
+                        <div
+                          key={gw.code}
+                          className={`bg-slate-900 border rounded-xl p-6 space-y-4 flex flex-col justify-between transition-colors ${
+                            gw.enabled ? 'border-slate-800' : 'border-slate-800/60 opacity-85'
+                          }`}
+                        >
+                          <div className="space-y-4">
+                            <div className="flex items-start justify-between border-b border-slate-800 pb-4 gap-3">
+                              <div>
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <h3 className="text-sm font-bold text-white">{gw.displayName}</h3>
+                                  <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-emerald-400">
+                                    {gw.code}
+                                  </span>
+                                  {gw.isDefault && (
+                                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-950/70 border border-emerald-500/40 text-emerald-300">
+                                      DEFAULT
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-xs text-slate-400 mt-1">
+                                  Status:{' '}
+                                  <span
+                                    className={
+                                      gw.enabled
+                                        ? 'text-emerald-400 font-medium'
+                                        : 'text-slate-500 font-medium'
+                                    }
+                                  >
+                                    {gw.enabled ? gw.healthStatus : 'Turned OFF'}
+                                  </span>{' '}
+                                  · Secret:{' '}
+                                  <span className="font-mono text-slate-300">
+                                    {gw.hasSecretConfigured ? 'Configured ✓' : 'Not Set'}
+                                  </span>
+                                </p>
+                              </div>
+
+                              <div className="flex items-center gap-2.5 shrink-0">
+                                {/* Interactive Gateway ON / OFF Toggle Switch */}
+                                <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 px-2.5 py-1.5 rounded-lg">
+                                  <span
+                                    className={`text-[11px] font-mono font-bold ${
+                                      gw.enabled ? 'text-emerald-400' : 'text-slate-500'
+                                    }`}
+                                  >
+                                    {gw.enabled ? 'ON' : 'OFF'}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    role="switch"
+                                    aria-checked={Boolean(gw.enabled)}
+                                    onClick={() => handleToggleGateway(gw, 'enabled', !gw.enabled)}
+                                    className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                                      gw.enabled ? 'bg-emerald-500' : 'bg-slate-700'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                                        gw.enabled ? 'translate-x-4' : 'translate-x-0'
+                                      }`}
+                                    />
+                                  </button>
+                                </div>
+
+                                {!gw.isDefault && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleGateway(gw, 'isDefault', true)}
+                                    className="px-2.5 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg"
+                                  >
+                                    Set Default
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            {isPayGlocal && (
+                              <div className="bg-slate-950 border border-emerald-500/30 rounded-lg p-3.5 space-y-2 text-xs">
+                                <div className="flex items-center justify-between">
+                                  <span className="font-semibold text-emerald-300">
+                                    PayGlocal Standard Pricing &amp; Cross-Border MDR
+                                  </span>
+                                  <a
+                                    href="https://payglocal.in/pricing"
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-[11px] font-mono text-emerald-400 hover:underline flex items-center gap-1"
+                                  >
+                                    <span>payglocal.in/pricing</span>
+                                    <ExternalLink className="w-3 h-3" />
+                                  </a>
+                                </div>
+                                <div className="grid grid-cols-3 gap-2 text-[11px]">
+                                  <div className="bg-slate-900/90 border border-slate-800 rounded p-2">
+                                    <div className="text-slate-400">UPI &amp; RuPay Debit</div>
+                                    <div className="font-mono font-bold text-white mt-0.5">
+                                      0% MDR
+                                    </div>
+                                  </div>
+                                  <div className="bg-slate-900/90 border border-slate-800 rounded p-2">
+                                    <div className="text-slate-400">Domestic Cards / NB</div>
+                                    <div className="font-mono font-bold text-white mt-0.5">
+                                      1.85% – 2.00%
+                                    </div>
+                                  </div>
+                                  <div className="bg-slate-900/90 border border-slate-800 rounded p-2">
+                                    <div className="text-slate-400">Intl Cards (130+ Currencies)</div>
+                                    <div className="font-mono font-bold text-emerald-400 mt-0.5">
+                                      2.99% – 3.30%
+                                    </div>
+                                  </div>
+                                </div>
+                                <div className="text-[11px] font-mono text-slate-400">
+                                  Setup Fee: ₹0 · Annual Maintenance (AMC): ₹0 · Protocol: JWE/JWS (x-gl-token)
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="space-y-3 text-xs">
+                              <div>
+                                <label className="text-slate-400 block mb-1">
+                                  Environment Mode
+                                </label>
+                                <select
+                                  value={draft.environment}
+                                  onChange={(e) =>
+                                    setGatewayEdits((prev) => ({
+                                      ...prev,
+                                      [gw.code]: { ...draft, environment: e.target.value },
+                                    }))
+                                  }
+                                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
+                                >
+                                  <option value="PRODUCTION">PRODUCTION (Live Merchant Keys)</option>
+                                  <option value="SANDBOX">SANDBOX (Test / UAT Keys)</option>
+                                </select>
+                              </div>
+
+                              <div>
+                                <label className="text-slate-400 block mb-1">
+                                  {merchantIdLabel}
+                                </label>
+                                <input
+                                  type="text"
+                                  value={draft.merchantId}
+                                  onChange={(e) =>
+                                    setGatewayEdits((prev) => ({
+                                      ...prev,
+                                      [gw.code]: { ...draft, merchantId: e.target.value },
+                                    }))
+                                  }
+                                  placeholder={
+                                    isPayU
+                                      ? 'e.g. 8492104'
+                                      : isZoho
+                                      ? 'e.g. 60029481920'
+                                      : isPayPal
+                                      ? 'e.g. XPERISERV_PAYPAL_MERCHANT_ID'
+                                      : 'e.g. xperiserv_payglocal_prod'
+                                  }
+                                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
+                                />
+                              </div>
+
+                              <div>
+                                <label className="text-slate-400 block mb-1 font-medium text-emerald-300">
+                                  {publicKeyLabel} *
+                                </label>
+                                <input
+                                  type="text"
+                                  value={draft.publicKeyOrClientId}
+                                  onChange={(e) =>
+                                    setGatewayEdits((prev) => ({
+                                      ...prev,
+                                      [gw.code]: { ...draft, publicKeyOrClientId: e.target.value },
+                                    }))
+                                  }
+                                  placeholder={
+                                    isPayU
+                                      ? 'Enter PayU Merchant Key'
+                                      : isZoho
+                                      ? 'Enter Zoho OAuth Client ID (1000.xxxx)'
+                                      : isPayPal
+                                      ? 'Enter PayPal REST Client ID (A...)'
+                                      : 'Enter PayGlocal Public Key ID (kid) / API Key'
+                                  }
+                                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
+                                />
+                              </div>
+
+                              <div>
+                                <div className="flex items-center justify-between mb-1">
+                                  <label className="text-slate-400 font-medium text-emerald-300">
+                                    {secretLabel} *
+                                  </label>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setShowGatewaySecret((prev) => ({
+                                        ...prev,
+                                        [gw.code]: !prev[gw.code],
+                                      }))
+                                    }
+                                    className="text-[11px] font-mono text-emerald-400 hover:underline"
+                                  >
+                                    {showGatewaySecret[gw.code] ? 'Hide' : 'Show'}
+                                  </button>
+                                </div>
+                                <input
+                                  type={showGatewaySecret[gw.code] ? 'text' : 'password'}
+                                  value={draft.secretOrSalt}
+                                  onChange={(e) =>
+                                    setGatewayEdits((prev) => ({
+                                      ...prev,
+                                      [gw.code]: { ...draft, secretOrSalt: e.target.value },
+                                    }))
+                                  }
+                                  placeholder={
+                                    gw.hasSecretConfigured
+                                      ? '•••••••••••••••• (Saved — enter new value to replace)'
+                                      : `Enter ${secretLabel}`
+                                  }
+                                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
+                                />
+                              </div>
+
+                              <div>
+                                <label className="text-slate-400 block mb-1">{webhookLabel}</label>
+                                <input
+                                  type={showGatewaySecret[gw.code] ? 'text' : 'password'}
+                                  value={draft.webhookSecret}
+                                  onChange={(e) =>
+                                    setGatewayEdits((prev) => ({
+                                      ...prev,
+                                      [gw.code]: { ...draft, webhookSecret: e.target.value },
+                                    }))
+                                  }
+                                  placeholder={
+                                    gw.hasWebhookSecretConfigured
+                                      ? '•••••••••••• (Saved — enter new webhook secret to replace)'
+                                      : `Enter ${webhookLabel}`
+                                  }
+                                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
+                                />
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-2.5 pt-1">
+                                <div>
+                                  <label className="text-slate-500 block mb-1">Currencies</label>
+                                  <input
+                                    type="text"
+                                    value={draft.supportedCurrencies}
+                                    onChange={(e) =>
+                                      setGatewayEdits((prev) => ({
+                                        ...prev,
+                                        [gw.code]: {
+                                          ...draft,
+                                          supportedCurrencies: e.target.value,
+                                        },
+                                      }))
+                                    }
+                                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-slate-200"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="text-slate-500 block mb-1">Methods</label>
+                                  <input
+                                    type="text"
+                                    value={draft.supportedMethods}
+                                    onChange={(e) =>
+                                      setGatewayEdits((prev) => ({
+                                        ...prev,
+                                        [gw.code]: {
+                                          ...draft,
+                                          supportedMethods: e.target.value,
+                                        },
+                                      }))
+                                    }
+                                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-slate-200"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+
+                            {verifyResult && (
+                              <div
+                                className={`rounded-lg p-3 border text-xs space-y-1 ${
+                                  verifyResult.verified
+                                    ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                                    : 'bg-rose-950/40 border-rose-500/40 text-rose-200'
+                                }`}
                               >
-                                Set Default
-                              </button>
+                                <div className="font-semibold flex items-center justify-between">
+                                  <span>
+                                    {verifyResult.verified
+                                      ? 'Gateway Keys Verified'
+                                      : 'Key Verification Error'}
+                                  </span>
+                                  <span className="text-[10px] font-mono opacity-75">
+                                    {new Date(verifyResult.checkedAt).toLocaleTimeString()}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] leading-relaxed">{verifyResult.message}</p>
+                                {verifyResult.signaturePreview && (
+                                  <div className="text-[10px] font-mono text-slate-400 pt-0.5">
+                                    Test Digest: {verifyResult.signaturePreview}
+                                  </div>
+                                )}
+                              </div>
                             )}
                           </div>
-                        </div>
 
-                        <div className="grid grid-cols-2 gap-3 text-xs">
-                          <div>
-                            <span className="text-slate-500 block">Environment Mode</span>
-                            <select
-                              value={gw.environment}
-                              onChange={(e) =>
-                                handleToggleGateway(gw, 'environment', e.target.value)
-                              }
-                              className="mt-1 w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-slate-200"
+                          <div className="pt-3 border-t border-slate-800 flex items-center gap-2">
+                            <button
+                              type="button"
+                              disabled={savingGatewayCode === gw.code}
+                              onClick={() => handleSaveGatewayCredentials(gw)}
+                              className="flex-1 py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors"
                             >
-                              <option value="SANDBOX">SANDBOX (Test Credentials)</option>
-                              <option value="PRODUCTION">PRODUCTION (Live Merchant)</option>
-                            </select>
-                          </div>
-                          <div>
-                            <span className="text-slate-500 block">Merchant / Account ID</span>
-                            <div className="mt-1 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-slate-200">
-                              {gw.merchantId}
-                            </div>
-                          </div>
-                          <div>
-                            <span className="text-slate-500 block">Public Key / Client ID</span>
-                            <div className="mt-1 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-slate-200">
-                              {gw.publicKeyOrClientId}
-                            </div>
-                          </div>
-                          <div>
-                            <span className="text-slate-500 block">
-                              Encrypted Salt / Client Secret
-                            </span>
-                            <div className="mt-1 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-slate-500">
-                              {gw.encryptedSecretOrSalt} (Server-Only)
-                            </div>
-                          </div>
-                          <div>
-                            <span className="text-slate-500 block">Supported Methods</span>
-                            <div className="mt-1 font-mono text-slate-300">
-                              {gw.supportedMethods}
-                            </div>
-                          </div>
-                          <div>
-                            <span className="text-slate-500 block">Transaction Limits</span>
-                            <div className="mt-1 font-mono text-slate-300">
-                              {formatINR(gw.minTransactionPaise)} –{' '}
-                              {formatINR(gw.maxTransactionPaise)}
-                            </div>
+                              {savingGatewayCode === gw.code
+                                ? 'Saving Keys...'
+                                : `Save ${shortName} Keys`}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={verifyingGatewayCode === gw.code}
+                              onClick={() => handleVerifyGatewayKeys(gw)}
+                              className="py-2.5 px-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 text-xs font-medium rounded-lg transition-colors"
+                            >
+                              {verifyingGatewayCode === gw.code ? 'Testing...' : 'Verify Keys'}
+                            </button>
                           </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}

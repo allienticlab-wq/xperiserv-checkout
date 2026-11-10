@@ -85,10 +85,21 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     enabledGateways.find((g) => g.isDefault) ||
     enabledGateways[0];
 
-  // Single Customer Choice: Only PayU India or Zoho Payments
-  const [selectedGatewayCode, setSelectedGatewayCode] = useState<'PAYU' | 'ZOHO_PAYMENTS'>(
-    (defaultGw?.code as 'PAYU' | 'ZOHO_PAYMENTS') || 'PAYU'
-  );
+  // Customer Gateway Choice: PayU India, Zoho Payments, PayPal, or PayGlocal
+  const [selectedGatewayCode, setSelectedGatewayCode] = useState<
+    'PAYU' | 'ZOHO_PAYMENTS' | 'PAYPAL' | 'PAYGLOCAL'
+  >((defaultGw?.code as 'PAYU' | 'ZOHO_PAYMENTS' | 'PAYPAL' | 'PAYGLOCAL') || 'PAYU');
+
+  useEffect(() => {
+    if (
+      enabledGateways.length > 0 &&
+      !enabledGateways.some((g) => g.code === selectedGatewayCode)
+    ) {
+      setSelectedGatewayCode(
+        enabledGateways[0].code as 'PAYU' | 'ZOHO_PAYMENTS' | 'PAYPAL' | 'PAYGLOCAL'
+      );
+    }
+  }, [enabledGateways, selectedGatewayCode]);
 
   // Guest Customer Details (Production clean defaults)
   const [customerName, setCustomerName] = useState<string>(order?.customerName || '');
@@ -122,10 +133,8 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
   const [copiedHash, setCopiedHash] = useState<boolean>(false);
   const [copiedOrderId, setCopiedOrderId] = useState<boolean>(false);
 
-  // Private Purchase Link (/pay/{token}) State
-  const [privateLinkToken, setPrivateLinkToken] = useState<string>(
-    initialPrivateLinkToken || paymentLinks.find((l) => l.status === 'Active')?.linkToken || ''
-  );
+  // Private Purchase Link (/pay/{token}) State — Strictly bound to the exact URL token only (never listed publicly)
+  const [privateLinkToken, setPrivateLinkToken] = useState<string>(initialPrivateLinkToken || '');
   const [privateLinkData, setPrivateLinkData] = useState<any | null>(null);
   const [privateLinkLoading, setPrivateLinkLoading] = useState<boolean>(false);
   const [privateQuantity, setPrivateQuantity] = useState<number>(1);
@@ -359,6 +368,10 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
           instrumentDetail:
             selectedGatewayCode === 'PAYU'
               ? 'PayU India Hosted Checkout'
+              : selectedGatewayCode === 'PAYPAL'
+              ? 'PayPal Orders v2 Checkout'
+              : selectedGatewayCode === 'PAYGLOCAL'
+              ? 'PayGlocal Cross-Border & Domestic Checkout'
               : 'Zoho Payments Hosted Checkout',
           simulateOutcome,
           customerName,
@@ -459,20 +472,8 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
           </div>
         </div>
 
-        {/* Navigation Links: Switch between Regular Checkout, Private Purchase Link (/pay/token), Public Order Tracker (/track-order), and Policies */}
+        {/* Public Navigation Links: Regular Checkout (/checkout), Public Order Tracker (/track-order), and Policies (Private Purchase Links are strictly unlisted) */}
         <nav className="flex flex-wrap items-center gap-5 text-xs font-medium">
-          <button
-            type="button"
-            onClick={() => setPortalMode('PRIVATE_LINK')}
-            className={`transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
-              portalMode === 'PRIVATE_LINK'
-                ? 'text-emerald-400 underline underline-offset-8 font-semibold'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Lock className="w-3.5 h-3.5" />
-            Private Link Checkout (/pay/token)
-          </button>
           <button
             type="button"
             onClick={() => setPortalMode('CHECKOUT')}
@@ -482,7 +483,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                 : 'text-slate-400 hover:text-white'
             }`}
           >
-            Regular Checkout (/checkout)
+            Storefront Checkout (/checkout)
           </button>
           <button
             type="button"
@@ -518,55 +519,10 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
 
       {/* ===================================================================== */}
       {/* MODE 1: DEDICATED SINGLE-PRODUCT PRIVATE PURCHASE LINK (/pay/:token)  */}
+      {/* Strictly accessible ONLY when opened with a direct /pay/:token link   */}
       {/* ===================================================================== */}
       {portalMode === 'PRIVATE_LINK' && (
         <main className="flex-1 max-w-6xl w-full mx-auto px-6 py-8 space-y-6">
-          {/* Private Purchase Link URL Bar */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4 text-xs">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <span className="px-2.5 py-1 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-mono font-semibold shrink-0">
-                PRIVATE LINK
-              </span>
-              <span className="font-mono text-slate-300 truncate">
-                https://checkout.xperiserv.in/pay/{privateLinkToken || '<token>'}
-              </span>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {paymentLinks.length > 0 ? (
-                <>
-                  <span className="text-slate-400">Select Purchase Link:</span>
-                  {paymentLinks.map((pl: any) => (
-                    <button
-                      key={pl.linkToken}
-                      type="button"
-                      onClick={() => setPrivateLinkToken(pl.linkToken)}
-                      className={`px-2.5 py-1 rounded-md font-mono text-[11px] border transition-colors ${
-                        privateLinkToken === pl.linkToken
-                          ? 'bg-emerald-600 text-white border-emerald-500'
-                          : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700'
-                      }`}
-                    >
-                      {pl.status === 'Expired' || pl.status === 'Revoked'
-                        ? `[${pl.status}] `
-                        : ''}
-                      {pl.title?.slice(0, 26) || pl.linkToken.slice(0, 16)}
-                    </button>
-                  ))}
-                </>
-              ) : (
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={privateLinkToken}
-                    onChange={(e) => setPrivateLinkToken(e.target.value.trim())}
-                    placeholder="Enter /pay/ token..."
-                    className="bg-slate-950 border border-slate-800 rounded-md px-3 py-1 font-mono text-xs text-slate-200 w-64"
-                  />
-                </div>
-              )}
-            </div>
-          </div>
-
           {privateLinkLoading ? (
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-12 text-center text-xs text-slate-400">
               Validating cryptographic purchase token with checkout.xperiserv.in...
@@ -891,7 +847,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                           )}
                         </div>
 
-                        {/* Payment Gateway Selection: PayU India or Zoho Payments */}
+                        {/* Payment Gateway Selection: PayU India, Zoho Payments, PayPal, or PayGlocal */}
                         <div className="space-y-2">
                           <label className="block text-xs font-semibold text-slate-300">
                             Select Payment Gateway
@@ -899,12 +855,30 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                             {enabledGateways.map((gw) => {
                               const isSelected = selectedGatewayCode === gw.code;
+                              const label =
+                                gw.code === 'PAYU'
+                                  ? 'PayU India'
+                                  : gw.code === 'PAYPAL'
+                                  ? 'PayPal'
+                                  : gw.code === 'PAYGLOCAL'
+                                  ? 'PayGlocal'
+                                  : 'Zoho Payments';
+                              const desc =
+                                gw.code === 'PAYU'
+                                  ? 'PayU India Hosted Checkout (UPI, Cards, NetBanking)'
+                                  : gw.code === 'PAYPAL'
+                                  ? 'PayPal Checkout (PayPal Wallet, Global Cards & PayLater)'
+                                  : gw.code === 'PAYGLOCAL'
+                                  ? 'PayGlocal Cross-Border & Domestic (130+ Currencies, Cards & UPI)'
+                                  : 'Zoho Payments Checkout (UPI, Cards, NetBanking)';
                               return (
                                 <button
                                   key={gw.code}
                                   type="button"
                                   onClick={() =>
-                                    setSelectedGatewayCode(gw.code as 'PAYU' | 'ZOHO_PAYMENTS')
+                                    setSelectedGatewayCode(
+                                      gw.code as 'PAYU' | 'ZOHO_PAYMENTS' | 'PAYPAL' | 'PAYGLOCAL'
+                                    )
                                   }
                                   className={`text-left p-3.5 rounded-xl border transition-colors ${
                                     isSelected
@@ -913,18 +887,12 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                                   }`}
                                 >
                                   <div className="flex items-center justify-between">
-                                    <span className="text-xs font-bold text-white">
-                                      {gw.code === 'PAYU' ? 'PayU India' : 'Zoho Payments'}
-                                    </span>
+                                    <span className="text-xs font-bold text-white">{label}</span>
                                     <span className="text-[11px] font-mono text-emerald-400">
                                       {isSelected ? 'Selected' : 'Select'}
                                     </span>
                                   </div>
-                                  <p className="text-[11px] text-slate-400 mt-1">
-                                    {gw.code === 'PAYU'
-                                      ? 'Official PayU India Hosted Checkout (SHA-512)'
-                                      : 'Official Zoho Payments Checkout (HMAC-SHA256)'}
-                                  </p>
+                                  <p className="text-[11px] text-slate-400 mt-1">{desc}</p>
                                 </button>
                               );
                             })}
@@ -992,7 +960,13 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                             {processing
                               ? 'Verifying Gateway Signature...'
                               : `Pay ${formatINR(finalPayablePaise)} via ${
-                                  selectedGatewayCode === 'PAYU' ? 'PayU India' : 'Zoho Payments'
+                                  selectedGatewayCode === 'PAYU'
+                                    ? 'PayU India'
+                                    : selectedGatewayCode === 'PAYPAL'
+                                    ? 'PayPal'
+                                    : selectedGatewayCode === 'PAYGLOCAL'
+                                    ? 'PayGlocal'
+                                    : 'Zoho Payments'
                                 }`}
                           </span>
                         </button>
@@ -1677,20 +1651,38 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                       </div>
                     </div>
 
-                    {/* Step 2: Single Customer Choice — PayU India OR Zoho Payments */}
+                    {/* Step 2: Customer Choice — PayU India, Zoho Payments, PayPal, or PayGlocal */}
                     <div className="space-y-3">
                       <h2 className="text-xs font-semibold text-slate-300">
-                        2. Select Payment Gateway (PayU India or Zoho Payments)
+                        2. Select Payment Gateway (PayU India, Zoho Payments, PayPal, or PayGlocal)
                       </h2>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         {enabledGateways.map((gw) => {
                           const isSelected = selectedGatewayCode === gw.code;
+                          const label =
+                            gw.code === 'PAYU'
+                              ? 'PayU India'
+                              : gw.code === 'PAYPAL'
+                              ? 'PayPal'
+                              : gw.code === 'PAYGLOCAL'
+                              ? 'PayGlocal'
+                              : 'Zoho Payments';
+                          const desc =
+                            gw.code === 'PAYU'
+                              ? 'Official PayU India Hosted Checkout (SHA-512 Verified)'
+                              : gw.code === 'PAYPAL'
+                              ? 'Official PayPal Checkout (Orders v2 · Global & India)'
+                              : gw.code === 'PAYGLOCAL'
+                              ? 'Official PayGlocal Checkout (Cross-Border 130+ Currencies & Domestic UPI/Cards)'
+                              : 'Official Zoho Payments Hosted Checkout (HMAC-SHA256 Verified)';
                           return (
                             <button
                               key={gw.code}
                               type="button"
                               onClick={() =>
-                                setSelectedGatewayCode(gw.code as 'PAYU' | 'ZOHO_PAYMENTS')
+                                setSelectedGatewayCode(
+                                  gw.code as 'PAYU' | 'ZOHO_PAYMENTS' | 'PAYPAL' | 'PAYGLOCAL'
+                                )
                               }
                               className={`text-left p-4 rounded-xl border transition-colors ${
                                 isSelected
@@ -1699,18 +1691,12 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                               }`}
                             >
                               <div className="flex items-center justify-between">
-                                <span className="text-sm font-bold text-white">
-                                  {gw.code === 'PAYU' ? 'PayU India' : 'Zoho Payments'}
-                                </span>
+                                <span className="text-sm font-bold text-white">{label}</span>
                                 <span className="text-xs font-mono text-emerald-400">
                                   {isSelected ? 'Selected' : 'Select'}
                                 </span>
                               </div>
-                              <p className="text-xs text-slate-400 mt-1">
-                                {gw.code === 'PAYU'
-                                  ? 'Official PayU India Hosted Checkout (SHA-512 Verified)'
-                                  : 'Official Zoho Payments Hosted Checkout (HMAC-SHA256 Verified)'}
-                              </p>
+                              <p className="text-xs text-slate-400 mt-1">{desc}</p>
                             </button>
                           );
                         })}
@@ -1778,7 +1764,13 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                         {processing
                           ? 'Verifying Gateway Hash...'
                           : `Pay ${formatINR(order.totalAmountPaise)} with ${
-                              selectedGatewayCode === 'PAYU' ? 'PayU India' : 'Zoho Payments'
+                              selectedGatewayCode === 'PAYU'
+                                ? 'PayU India'
+                                : selectedGatewayCode === 'PAYPAL'
+                                ? 'PayPal'
+                                : selectedGatewayCode === 'PAYGLOCAL'
+                                ? 'PayGlocal'
+                                : 'Zoho Payments'
                             }`}
                       </span>
                     </button>
