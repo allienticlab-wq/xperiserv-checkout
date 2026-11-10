@@ -705,12 +705,17 @@ app.post('/api/v1/checkout/activate-product', async (req, res) => {
 app.get('/api/v1/pay/:token', async (req, res) => {
   try {
     await ensureSeeded();
-    const rawToken = (req.params.token || '').trim();
+    let rawToken = decodeURIComponent(req.params.token || '').trim();
+    rawToken = rawToken.replace(/^.*\/pay\//i, '').replace(/\/+$/, '').trim();
     const computedHash = crypto.createHash('sha256').update(rawToken).digest('hex');
 
     const allLinks = await db.select().from(paymentLinks);
     const link = allLinks.find(
-      (l) => l.tokenHash === computedHash || l.linkToken === rawToken
+      (l) =>
+        l.tokenHash.toLowerCase() === rawToken.toLowerCase() ||
+        l.tokenHash === computedHash ||
+        l.linkToken.toLowerCase() === rawToken.toLowerCase() ||
+        l.linkToken === rawToken
     );
 
     if (!link) {
@@ -736,8 +741,16 @@ app.get('/api/v1/pay/:token', async (req, res) => {
       });
     }
 
-    const isExpired = new Date(link.expiresAt).getTime() < Date.now();
-    if (isExpired && link.status === 'Active') {
+    const isNeverExpiring = new Date(link.expiresAt).getFullYear() >= 2090;
+    const isExpired = !isNeverExpiring && new Date(link.expiresAt).getTime() < Date.now();
+
+    if (isNeverExpiring && link.status === 'Expired') {
+      await db
+        .update(paymentLinks)
+        .set({ status: 'Active', updatedAt: new Date() })
+        .where(eq(paymentLinks.id, link.id));
+      link.status = 'Active';
+    } else if (isExpired && link.status === 'Active') {
       await db
         .update(paymentLinks)
         .set({ status: 'Expired', updatedAt: new Date() })
@@ -751,6 +764,7 @@ app.get('/api/v1/pay/:token', async (req, res) => {
         reason: link.status.toUpperCase(),
         message: `This private purchase link has been ${link.status.toLowerCase()} by the administrator.`,
         expiresAt: link.expiresAt,
+        neverExpires: isNeverExpiring,
       });
     }
 
@@ -760,6 +774,7 @@ app.get('/api/v1/pay/:token', async (req, res) => {
         reason: 'EXPIRED',
         message: 'This private purchase link has expired and can no longer accept orders.',
         expiresAt: link.expiresAt,
+        neverExpires: isNeverExpiring,
       });
     }
 
@@ -769,6 +784,7 @@ app.get('/api/v1/pay/:token', async (req, res) => {
         reason: 'EXHAUSTED',
         message: `This purchase link has reached its maximum allowed purchase limit (${link.maxPurchases}/${link.maxPurchases}).`,
         expiresAt: link.expiresAt,
+        neverExpires: isNeverExpiring,
       });
     }
 
@@ -793,6 +809,7 @@ app.get('/api/v1/pay/:token', async (req, res) => {
         purchasesCount: link.purchasesCount,
         remainingUses: Math.max(0, link.maxPurchases - link.purchasesCount),
         expiresAt: link.expiresAt,
+        neverExpires: isNeverExpiring,
         status: link.status,
       },
       product: {
@@ -830,18 +847,26 @@ app.get('/api/v1/pay/:token', async (req, res) => {
 app.post('/api/v1/pay/:token/checkout', async (req, res) => {
   try {
     await ensureSeeded();
-    const rawToken = (req.params.token || '').trim();
+    let rawToken = decodeURIComponent(req.params.token || '').trim();
+    rawToken = rawToken.replace(/^.*\/pay\//i, '').replace(/\/+$/, '').trim();
     const computedHash = crypto.createHash('sha256').update(rawToken).digest('hex');
 
     const allLinks = await db.select().from(paymentLinks);
     const link = allLinks.find(
-      (l) => l.tokenHash === computedHash || l.linkToken === rawToken
+      (l) =>
+        l.tokenHash.toLowerCase() === rawToken.toLowerCase() ||
+        l.tokenHash === computedHash ||
+        l.linkToken.toLowerCase() === rawToken.toLowerCase() ||
+        l.linkToken === rawToken
     );
     if (!link) {
       return res.status(404).json({ error: 'Invalid or non-existent private purchase link.' });
     }
 
-    if (link.status !== 'Active' || new Date(link.expiresAt).getTime() < Date.now()) {
+    const isNeverExpiring = new Date(link.expiresAt).getFullYear() >= 2090;
+    const isExpired = !isNeverExpiring && new Date(link.expiresAt).getTime() < Date.now();
+
+    if (link.status !== 'Active' || isExpired) {
       return res.status(410).json({
         error: 'This private purchase link is expired or inactive.',
       });
@@ -1672,6 +1697,7 @@ app.get('/api/v1/products/public', async (_req, res) => {
 
 app.post('/api/v1/products', optionalAuth, async (req: AuthRequest, res) => {
   try {
+    await ensureSeeded();
     const {
       sku,
       name,
@@ -1692,38 +1718,87 @@ app.post('/api/v1/products', optionalAuth, async (req: AuthRequest, res) => {
       linkExpiryHours,
     } = req.body;
 
+    const cleanSku =
+      (sku || '').trim() ||
+      `${isPrivate ? 'ALT-PRV' : 'ALT-PRD'}-${Math.floor(100 + Math.random() * 899)}`;
+    const cleanName = (name || cleanSku).trim();
+    const cleanDescription = (description || cleanName).trim();
+    const cleanCategory =
+      (category || '').trim() ||
+      (isPrivate ? 'Private Enterprise Product' : 'Enterprise Software');
+    const cleanPricePaise = Math.max(100, Math.round(Number(unitPricePaise) || 100));
+    const cleanCurrency = (currency || 'INR').trim();
+    const cleanTaxRate = Number.isFinite(Number(taxRatePercent)) ? Number(taxRatePercent) : 18;
+    const cleanHsn = (hsnSacCode || '998314').trim();
+    const cleanIsPrivate = Boolean(isPrivate);
+    const cleanStock = Number.isFinite(Number(stockQuantity)) ? Number(stockQuantity) : 50;
+    const cleanShipping = Number.isFinite(Number(shippingChargesPaise))
+      ? Number(shippingChargesPaise)
+      : 0;
+    const cleanImageUrl = imageUrl && String(imageUrl).trim().length > 0 ? String(imageUrl).trim() : null;
+    const cleanAllowQty = allowQuantitySelection !== undefined ? Boolean(allowQuantitySelection) : true;
+    const cleanMaxQty = Number.isFinite(Number(maxQuantityPerOrder))
+      ? Number(maxQuantityPerOrder)
+      : 10;
+
     const inserted = await db
       .insert(products)
       .values({
-        sku:
-          sku ||
-          `${isPrivate ? 'ALT-PRV' : 'ALT-PRD'}-${Math.floor(100 + Math.random() * 899)}`,
-        name,
-        description: description || name,
-        category:
-          category || (isPrivate ? 'Private Enterprise Product' : 'Enterprise Software'),
-        unitPricePaise: Number(unitPricePaise),
-        currency: currency || 'INR',
-        taxRatePercent: Number(taxRatePercent ?? 18),
-        hsnSacCode: hsnSacCode || '998314',
-        isPrivate: Boolean(isPrivate),
-        stockQuantity: Number(stockQuantity ?? 50),
-        shippingChargesPaise: Number(shippingChargesPaise ?? 0),
-        imageUrl: imageUrl || null,
-        allowQuantitySelection: Boolean(allowQuantitySelection ?? true),
-        maxQuantityPerOrder: Number(maxQuantityPerOrder ?? 10),
+        sku: cleanSku,
+        name: cleanName,
+        description: cleanDescription,
+        category: cleanCategory,
+        unitPricePaise: cleanPricePaise,
+        currency: cleanCurrency,
+        taxRatePercent: cleanTaxRate,
+        hsnSacCode: cleanHsn,
+        isPrivate: cleanIsPrivate,
+        stockQuantity: cleanStock,
+        shippingChargesPaise: cleanShipping,
+        imageUrl: cleanImageUrl,
+        allowQuantitySelection: cleanAllowQty,
+        maxQuantityPerOrder: cleanMaxQty,
         active: true,
+      })
+      .onConflictDoUpdate({
+        target: products.sku,
+        set: {
+          name: cleanName,
+          description: cleanDescription,
+          category: cleanCategory,
+          unitPricePaise: cleanPricePaise,
+          currency: cleanCurrency,
+          taxRatePercent: cleanTaxRate,
+          hsnSacCode: cleanHsn,
+          isPrivate: cleanIsPrivate,
+          stockQuantity: cleanStock,
+          shippingChargesPaise: cleanShipping,
+          imageUrl: cleanImageUrl,
+          allowQuantitySelection: cleanAllowQty,
+          maxQuantityPerOrder: cleanMaxQty,
+          active: true,
+        },
       })
       .returning();
 
     const createdProduct = inserted[0];
     let createdLink = null;
 
-    if (isPrivate && generateInitialLink !== false) {
+    if (cleanIsPrivate && generateInitialLink !== false) {
       const linkToken = `plk_live_${crypto.randomBytes(14).toString('hex')}`;
       const tokenHash = crypto.createHash('sha256').update(linkToken).digest('hex');
-      const expiryHours = Number(linkExpiryHours || 168); // default 7 days
-      const expiresAt = new Date(Date.now() + expiryHours * 3600 * 1000);
+      let expiresAt: Date;
+      const isIndefinite =
+        req.body.neverExpires === true ||
+        req.body.linkNeverExpires === true ||
+        Number(linkExpiryHours) === 0;
+
+      if (isIndefinite) {
+        expiresAt = new Date('2099-12-31T23:59:59Z');
+      } else {
+        const expiryHours = Number(linkExpiryHours || 168); // default 7 days
+        expiresAt = new Date(Date.now() + expiryHours * 3600 * 1000);
+      }
 
       const insLink = await db
         .insert(paymentLinks)
@@ -1733,30 +1808,30 @@ app.post('/api/v1/products', optionalAuth, async (req: AuthRequest, res) => {
           productId: createdProduct.id,
           title: `${createdProduct.name} — Private Purchase Link`,
           allowQuantity: createdProduct.allowQuantitySelection,
-          maxPurchases: Number(linkMaxPurchases || 1),
+          maxPurchases: Math.max(1, Number(linkMaxPurchases || 1)),
           purchasesCount: 0,
           status: 'Active',
           expiresAt,
-          createdBy: req.dbUser?.email || 'swayamsiddhantn@gmail.com',
-          notes: `Auto-generated for private product ${createdProduct.sku}`,
+          createdBy: req.dbUser?.email || 'admin@xperiserv.in',
+          notes: `Auto-generated for private product ${createdProduct.sku}${isIndefinite ? ' (Never Expires)' : ''}`,
         })
         .returning();
       createdLink = insLink[0];
 
       await NotificationService.sendAndLog({
         eventType: 'order.created',
-        recipientEmail: req.dbUser?.email || 'swayamsiddhantn@gmail.com',
+        recipientEmail: req.dbUser?.email || 'admin@xperiserv.in',
         customerName: 'Allientic Administrator',
         orderNumber: createdProduct.sku,
         amountFormatted: `₹${(createdProduct.unitPricePaise / 100).toFixed(2)}`,
-        extraNote: `Private Purchase Link generated: https://checkout.xperiserv.in/pay/${linkToken} (Max uses: ${createdLink.maxPurchases})`,
+        extraNote: `Private Purchase Link generated: https://checkout.xperiserv.in/pay/${linkToken} (Max uses: ${createdLink.maxPurchases}, Expiry: ${isIndefinite ? 'Never Expires' : expiresAt.toISOString()})`,
       });
     }
 
     await db.insert(auditLogs).values({
-      actorEmail: req.dbUser?.email || 'swayamsiddhantn@gmail.com',
+      actorEmail: req.dbUser?.email || 'admin@xperiserv.in',
       actorRole: 'Super Administrator',
-      action: isPrivate ? 'PRIVATE_PRODUCT_CREATED' : 'PUBLIC_PRODUCT_CREATED',
+      action: cleanIsPrivate ? 'PRIVATE_PRODUCT_CREATED' : 'PUBLIC_PRODUCT_CREATED',
       resourceType: 'product',
       resourceId: createdProduct.sku,
       severity: 'INFO',
@@ -1804,6 +1879,46 @@ app.patch('/api/v1/products/:id', optionalAuth, async (req: AuthRequest, res) =>
   }
 });
 
+// Delete Product (Public or Private) & Cascade Remove Linked Payment Links
+app.delete('/api/v1/products/:id', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const id = Number(req.params.id);
+    const found = await db.select().from(products).where(eq(products.id, id));
+    if (!found[0]) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    const product = found[0];
+
+    // Remove foreign-key linked payment links first
+    await db.delete(paymentLinks).where(eq(paymentLinks.productId, id));
+
+    // Delete the product
+    await db.delete(products).where(eq(products.id, id));
+
+    await db.insert(auditLogs).values({
+      actorEmail: req.dbUser?.email || 'admin@xperiserv.in',
+      actorRole: 'Super Administrator',
+      action: 'PRODUCT_DELETED',
+      resourceType: 'product',
+      resourceId: product.sku,
+      severity: 'WARNING',
+      detailsJson: JSON.stringify({
+        id: product.id,
+        sku: product.sku,
+        name: product.name,
+        isPrivate: product.isPrivate,
+      }),
+    });
+
+    res.json({
+      success: true,
+      message: `Product ${product.sku} (${product.name}) and its payment links were deleted successfully`,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete product' });
+  }
+});
+
 // Create Unique Purchase Link for a Private Product
 app.post('/api/v1/payment-links', optionalAuth, async (req: AuthRequest, res) => {
   try {
@@ -1814,6 +1929,7 @@ app.post('/api/v1/payment-links', optionalAuth, async (req: AuthRequest, res) =>
       maxPurchases,
       expiryHours,
       expiresAt,
+      neverExpires,
       notes,
       notifyEmail,
     } = req.body;
@@ -1829,9 +1945,17 @@ app.post('/api/v1/payment-links', optionalAuth, async (req: AuthRequest, res) =>
 
     const linkToken = `plk_live_${crypto.randomBytes(14).toString('hex')}`;
     const tokenHash = crypto.createHash('sha256').update(linkToken).digest('hex');
-    const resolvedExpiresAt = expiresAt
-      ? new Date(expiresAt)
-      : new Date(Date.now() + Number(expiryHours || 168) * 3600 * 1000);
+
+    let resolvedExpiresAt: Date;
+    const isIndefinite = neverExpires === true || Number(expiryHours) === 0;
+
+    if (isIndefinite) {
+      resolvedExpiresAt = new Date('2099-12-31T23:59:59Z');
+    } else if (expiresAt) {
+      resolvedExpiresAt = new Date(expiresAt);
+    } else {
+      resolvedExpiresAt = new Date(Date.now() + Number(expiryHours || 168) * 3600 * 1000);
+    }
 
     const inserted = await db
       .insert(paymentLinks)
@@ -1846,7 +1970,7 @@ app.post('/api/v1/payment-links', optionalAuth, async (req: AuthRequest, res) =>
         status: 'Active',
         expiresAt: resolvedExpiresAt,
         createdBy: req.dbUser?.email || 'swayamsiddhantn@gmail.com',
-        notes: notes || null,
+        notes: notes || (isIndefinite ? 'Never Expires' : null),
       })
       .returning();
 
@@ -1861,6 +1985,7 @@ app.post('/api/v1/payment-links', optionalAuth, async (req: AuthRequest, res) =>
         productSku: product.sku,
         maxPurchases: inserted[0].maxPurchases,
         expiresAt: resolvedExpiresAt.toISOString(),
+        neverExpires: isIndefinite,
       }),
     });
 
@@ -1871,7 +1996,7 @@ app.post('/api/v1/payment-links', optionalAuth, async (req: AuthRequest, res) =>
         customerName: 'Designated Private Client',
         orderNumber: product.sku,
         amountFormatted: `₹${(product.unitPricePaise / 100).toFixed(2)}`,
-        extraNote: `Private Purchase Link: https://checkout.xperiserv.in/pay/${linkToken}`,
+        extraNote: `Private Purchase Link: https://checkout.xperiserv.in/pay/${linkToken}${isIndefinite ? ' (Never Expires)' : ''}`,
       });
     }
 
@@ -1884,11 +2009,11 @@ app.post('/api/v1/payment-links', optionalAuth, async (req: AuthRequest, res) =>
   }
 });
 
-// Activate, Deactivate, Revoke, or Regenerate a Purchase Link
+// Activate, Deactivate, Revoke, Regenerate, or Delete a Purchase Link
 app.patch('/api/v1/payment-links/:id', optionalAuth, async (req: AuthRequest, res) => {
   try {
     const id = Number(req.params.id);
-    const { action, status, maxPurchases, expiryHours } = req.body;
+    const { action, status, maxPurchases, expiryHours, neverExpires } = req.body;
     const found = await db.select().from(paymentLinks).where(eq(paymentLinks.id, id));
     if (!found[0]) {
       return res.status(404).json({ error: 'Payment link not found' });
@@ -1906,14 +2031,25 @@ app.patch('/api/v1/payment-links/:id', optionalAuth, async (req: AuthRequest, re
       nextStatus = 'Disabled';
     } else if (action === 'ACTIVATE') {
       nextStatus = 'Active';
-      if (new Date(current.expiresAt).getTime() < Date.now()) {
+      if (new Date(current.expiresAt).getFullYear() < 2090 && new Date(current.expiresAt).getTime() < Date.now()) {
         nextExpiresAt = new Date(Date.now() + 7 * 86400000);
       }
+    } else if (action === 'NEVER_EXPIRE') {
+      nextStatus = 'Active';
+      nextExpiresAt = new Date('2099-12-31T23:59:59Z');
+    } else if (action === 'EXTEND_7_DAYS') {
+      nextStatus = 'Active';
+      const baseTime = Math.max(Date.now(), new Date(current.expiresAt).getTime());
+      nextExpiresAt = new Date(baseTime + 7 * 86400000);
     } else if (action === 'REGENERATE') {
       nextToken = `plk_live_${crypto.randomBytes(14).toString('hex')}`;
       nextHash = crypto.createHash('sha256').update(nextToken).digest('hex');
       nextStatus = 'Active';
-      nextExpiresAt = new Date(Date.now() + Number(expiryHours || 168) * 3600 * 1000);
+      if (neverExpires || Number(expiryHours) === 0) {
+        nextExpiresAt = new Date('2099-12-31T23:59:59Z');
+      } else {
+        nextExpiresAt = new Date(Date.now() + Number(expiryHours || 168) * 3600 * 1000);
+      }
     }
 
     const updated = await db
@@ -1941,6 +2077,7 @@ app.patch('/api/v1/payment-links/:id', optionalAuth, async (req: AuthRequest, re
         previousToken: current.linkToken,
         newToken: updated[0].linkToken,
         status: updated[0].status,
+        expiresAt: updated[0].expiresAt,
       }),
     });
 
@@ -1950,13 +2087,135 @@ app.patch('/api/v1/payment-links/:id', optionalAuth, async (req: AuthRequest, re
   }
 });
 
-// Official Xperiserv.in Legal Policies API
-app.get('/api/v1/policies', (_req, res) => {
-  res.json({
-    version: XPERISERV_POLICY_VERSION,
-    domain: 'https://xperiserv.in',
-    policies: XPERISERV_POLICIES,
-  });
+// Delete Payment Link
+app.delete('/api/v1/payment-links/:id', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    const id = Number(req.params.id);
+    const found = await db.select().from(paymentLinks).where(eq(paymentLinks.id, id));
+    if (!found[0]) {
+      return res.status(404).json({ error: 'Payment link not found' });
+    }
+    const link = found[0];
+
+    await db.delete(paymentLinks).where(eq(paymentLinks.id, id));
+
+    await db.insert(auditLogs).values({
+      actorEmail: req.dbUser?.email || 'admin@xperiserv.in',
+      actorRole: 'Super Administrator',
+      action: 'PAYMENT_LINK_DELETED',
+      resourceType: 'payment_link',
+      resourceId: link.linkToken,
+      severity: 'WARNING',
+      detailsJson: JSON.stringify({
+        id: link.id,
+        linkToken: link.linkToken,
+        productId: link.productId,
+      }),
+    });
+
+    res.json({ success: true, message: 'Payment link deleted successfully' });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to delete payment link' });
+  }
+});
+
+// Official Xperiserv.in Legal Policies API (Read from Database or Fallback to Canonical Defaults)
+app.get('/api/v1/policies', async (_req, res) => {
+  try {
+    await ensureSeeded();
+    const row = await db
+      .select()
+      .from(systemSettings)
+      .where(eq(systemSettings.settingKey, 'merchant_policies_config'));
+    if (row[0]) {
+      try {
+        const parsed = JSON.parse(row[0].settingValueJson);
+        const storedPolicies: any[] = Array.isArray(parsed.policies) ? parsed.policies : [];
+        const mergedPolicies = XPERISERV_POLICIES.map((canon) => {
+          const custom = storedPolicies.find((p) => p.id === canon.id);
+          return custom ? { ...canon, ...custom } : canon;
+        });
+        storedPolicies.forEach((sp) => {
+          if (!mergedPolicies.some((p) => p.id === sp.id)) {
+            mergedPolicies.push(sp);
+          }
+        });
+        return res.json({
+          version: parsed.version || XPERISERV_POLICY_VERSION,
+          domain: parsed.domain || 'https://xperiserv.in',
+          policies: mergedPolicies,
+          updatedAt: row[0].updatedAt,
+        });
+      } catch {
+        // Fallback to static policies below
+      }
+    }
+    res.json({
+      version: XPERISERV_POLICY_VERSION,
+      domain: 'https://xperiserv.in',
+      policies: XPERISERV_POLICIES,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load policies' });
+  }
+});
+
+// Update & Publish Official Xperiserv.in Legal Policies
+app.put('/api/v1/policies', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    await ensureSeeded();
+    const { policies, version, domain } = req.body;
+    if (!policies || !Array.isArray(policies)) {
+      return res.status(400).json({ error: 'Policies must be an array of policy objects' });
+    }
+
+    const payload = {
+      version: version || XPERISERV_POLICY_VERSION,
+      domain: domain || 'https://xperiserv.in',
+      policies,
+      lastUpdated: new Date().toISOString(),
+      updatedBy: req.dbUser?.email || 'admin@xperiserv.in',
+    };
+
+    const existing = await db
+      .select()
+      .from(systemSettings)
+      .where(eq(systemSettings.settingKey, 'merchant_policies_config'));
+
+    if (existing[0]) {
+      await db
+        .update(systemSettings)
+        .set({
+          settingValueJson: JSON.stringify(payload),
+          updatedAt: new Date(),
+        })
+        .where(eq(systemSettings.settingKey, 'merchant_policies_config'));
+    } else {
+      await db.insert(systemSettings).values({
+        settingKey: 'merchant_policies_config',
+        settingValueJson: JSON.stringify(payload),
+      });
+    }
+
+    await db.insert(auditLogs).values({
+      actorEmail: req.dbUser?.email || 'admin@xperiserv.in',
+      actorRole: 'Super Administrator',
+      action: 'MERCHANT_POLICIES_UPDATED',
+      resourceType: 'system_settings',
+      resourceId: 'merchant_policies_config',
+      severity: 'INFO',
+      detailsJson: JSON.stringify({ policyCount: policies.length, version: payload.version }),
+    });
+
+    res.json({
+      success: true,
+      message: 'Merchant policies successfully updated and published',
+      policies: payload.policies,
+      version: payload.version,
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to update merchant policies' });
+  }
 });
 
 // 8. API Keys Management (Generate & Revoke)

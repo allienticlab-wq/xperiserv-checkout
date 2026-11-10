@@ -18,18 +18,25 @@ import {
 interface XperiservPolicyFooterProps {
   compact?: boolean;
   onOpenPolicyId?: (policyId: XperiservPolicy['id']) => void;
+  policies?: XperiservPolicy[];
+  version?: string;
 }
 
 export const XperiservPolicyModal: React.FC<{
   initialPolicyId?: XperiservPolicy['id'] | 'ALL';
   onClose: () => void;
-}> = ({ initialPolicyId = 'ALL', onClose }) => {
+  policies?: XperiservPolicy[];
+  version?: string;
+}> = ({ initialPolicyId = 'ALL', onClose, policies, version }) => {
   const [selectedTab, setSelectedTab] = useState<XperiservPolicy['id'] | 'ALL'>(initialPolicyId);
+
+  const activePolicyList = policies && policies.length > 0 ? policies : XPERISERV_POLICIES;
+  const activeVersion = version || XPERISERV_POLICY_VERSION;
 
   const displayedPolicies =
     selectedTab === 'ALL'
-      ? XPERISERV_POLICIES
-      : XPERISERV_POLICIES.filter((p) => p.id === selectedTab);
+      ? activePolicyList
+      : activePolicyList.filter((p) => p.id === selectedTab);
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-xs flex items-center justify-center p-4">
@@ -45,7 +52,7 @@ export const XperiservPolicyModal: React.FC<{
                 XperiServ Technologies (xperiserv.in) — Official Legal &amp; Business Policies
               </h2>
               <p className="text-[11px] font-mono text-slate-400">
-                Policy Version: {XPERISERV_POLICY_VERSION} · Verified Domain: https://xperiserv.in
+                Policy Version: {activeVersion} · Verified Domain: https://xperiserv.in
               </p>
             </div>
           </div>
@@ -69,9 +76,9 @@ export const XperiservPolicyModal: React.FC<{
                 : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
             }`}
           >
-            All 7 Policies
+            All Policies ({activePolicyList.length})
           </button>
-          {XPERISERV_POLICIES.map((pol) => (
+          {activePolicyList.map((pol) => (
             <button
               key={pol.id}
               type="button"
@@ -155,8 +162,14 @@ export const XperiservPolicyModal: React.FC<{
   );
 };
 
-export const XperiservPolicyFooter: React.FC<XperiservPolicyFooterProps> = ({ compact = false }) => {
+export const XperiservPolicyFooter: React.FC<XperiservPolicyFooterProps> = ({
+  compact = false,
+  policies,
+  version,
+}) => {
   const [modalPolicyId, setModalPolicyId] = useState<XperiservPolicy['id'] | 'ALL' | null>(null);
+  const activePolicyList = policies && policies.length > 0 ? policies : XPERISERV_POLICIES;
+  const activeVersion = version || XPERISERV_POLICY_VERSION;
 
   return (
     <>
@@ -198,7 +211,7 @@ export const XperiservPolicyFooter: React.FC<XperiservPolicyFooterProps> = ({ co
               <div className="space-y-1 md:text-right">
                 <div className="font-bold text-slate-200">Verified Policy Integration</div>
                 <p className="text-[11px] font-mono text-emerald-400">
-                  Version: {XPERISERV_POLICY_VERSION}
+                  Version: {activeVersion}
                 </p>
                 <button
                   type="button"
@@ -212,10 +225,10 @@ export const XperiservPolicyFooter: React.FC<XperiservPolicyFooterProps> = ({ co
             </div>
           )}
 
-          {/* All 7 Required Xperiserv.in Policy Links */}
+          {/* All Required Xperiserv.in Policy Links */}
           <div className="flex flex-wrap items-center justify-between gap-4 text-xs">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-              {XPERISERV_POLICIES.map((pol) => (
+              {activePolicyList.map((pol) => (
                 <span key={pol.id} className="inline-flex items-center gap-1.5">
                   <button
                     type="button"
@@ -247,6 +260,8 @@ export const XperiservPolicyFooter: React.FC<XperiservPolicyFooterProps> = ({ co
       {modalPolicyId && (
         <XperiservPolicyModal
           initialPolicyId={modalPolicyId}
+          policies={activePolicyList}
+          version={activeVersion}
           onClose={() => setModalPolicyId(null)}
         />
       )}

@@ -16,6 +16,7 @@ import {
   XperiservPolicyFooter,
   XperiservPolicyModal,
 } from './components/XperiservPolicyFooter.tsx';
+import { MerchantPolicyEditor } from './components/MerchantPolicyEditor.tsx';
 import {
   XPERISERV_POLICIES,
   XPERISERV_POLICY_VERSION,
@@ -53,6 +54,8 @@ import {
   LogOut,
   Eye,
   Link2,
+  Trash2,
+  ArrowLeft,
 } from 'lucide-react';
 
 type AdminSection =
@@ -193,6 +196,7 @@ export default function App() {
     maxQuantityPerOrder: '5',
     linkMaxPurchases: '1',
     linkExpiryHours: '168',
+    neverExpires: true,
   });
 
   const [newPaymentLinkForm, setNewPaymentLinkForm] = useState({
@@ -201,6 +205,7 @@ export default function App() {
     allowQuantity: true,
     maxPurchases: '1',
     expiryHours: '168',
+    neverExpires: true,
     notifyEmail: '',
     notes: '',
   });
@@ -302,26 +307,47 @@ export default function App() {
     >
   >({});
 
-  // Detect customer-facing URLs (/pay/:token, /track-order, /checkout/:token) automatically on boot
+  // Routing State: / is Customer Storefront; /admin is Admin Portal (Login or Dashboard)
+  const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() => {
+    return window.location.pathname.startsWith('/admin');
+  });
+
+  // Automatically detect and sync routing between customer storefront and admin portal
   useEffect(() => {
-    const path = window.location.pathname;
-    if (path.startsWith('/pay/')) {
-      const token = path.replace('/pay/', '').split('/')[0].trim();
-      if (token) {
-        setInitialPrivateLinkToken(token);
-        setCheckoutPortalMode('PRIVATE_LINK');
-        setActiveCheckoutToken(`pay_${token}`);
-      }
-    } else if (path.startsWith('/track-order')) {
-      setCheckoutPortalMode('TRACK_ORDER');
-      setActiveCheckoutToken('public_track_order');
-    } else if (path.startsWith('/checkout/')) {
-      const token = path.replace('/checkout/', '').split('/')[0].trim();
-      if (token) {
+    const syncRouteFromLocation = () => {
+      const path = window.location.pathname;
+      if (path.startsWith('/admin')) {
+        setIsAdminRoute(true);
+      } else if (path.startsWith('/pay/')) {
+        setIsAdminRoute(false);
+        const token = path.replace('/pay/', '').split('/')[0].trim();
+        if (token) {
+          setInitialPrivateLinkToken(token);
+          setCheckoutPortalMode('PRIVATE_LINK');
+          setActiveCheckoutToken(`pay_${token}`);
+        }
+      } else if (path.startsWith('/track-order')) {
+        setIsAdminRoute(false);
+        setCheckoutPortalMode('TRACK_ORDER');
+        setActiveCheckoutToken('public_track_order');
+      } else if (path.startsWith('/checkout/')) {
+        setIsAdminRoute(false);
+        const token = path.replace('/checkout/', '').split('/')[0].trim();
+        if (token) {
+          setCheckoutPortalMode('CHECKOUT');
+          setActiveCheckoutToken(token);
+        }
+      } else {
+        // Root / is the customer storefront
+        setIsAdminRoute(false);
         setCheckoutPortalMode('CHECKOUT');
-        setActiveCheckoutToken(token);
+        setActiveCheckoutToken('public_storefront');
       }
-    }
+    };
+
+    syncRouteFromLocation();
+    window.addEventListener('popstate', syncRouteFromLocation);
+    return () => window.removeEventListener('popstate', syncRouteFromLocation);
   }, []);
 
   useEffect(() => {
@@ -529,30 +555,42 @@ export default function App() {
     showToast(`Exported ${filename}`);
   };
 
-  // If user is currently viewing the Customer Hosted Checkout, Private Purchase Link (/pay/token), or Public Order Tracker (/track-order)
-  if (activeCheckoutToken && snapshot) {
+  // STOREFRONT FIRST: If route is not /admin, render the Customer Storefront Checkout Portal directly!
+  if (!isAdminRoute) {
+    if (loading && !snapshot) {
+      return (
+        <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6">
+          <div className="flex flex-col items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 font-bold animate-pulse text-lg">
+              A
+            </div>
+            <p className="text-xs font-mono text-slate-400">Loading Allientic Storefront &amp; Checkout...</p>
+          </div>
+        </div>
+      );
+    }
+
     const targetSession =
-      snapshot.checkoutSessions.find((s: any) => s.sessionToken === activeCheckoutToken) ||
-      snapshot.checkoutSessions[0] ||
+      snapshot?.checkoutSessions?.find((s: any) => s.sessionToken === activeCheckoutToken) ||
+      snapshot?.checkoutSessions?.[0] ||
       null;
     const targetOrder =
-      snapshot.orders.find((o: any) => o.id === targetSession?.orderId) || null;
+      snapshot?.orders?.find((o: any) => o.id === targetSession?.orderId) || null;
+
     return (
       <CustomerCheckoutPortal
         session={targetSession}
         order={targetOrder}
-        products={(snapshot.products || []).filter((p: any) => !p.isPrivate)}
-        paymentLinks={[]}
-        gateways={snapshot.gateways || []}
-        brandSettings={snapshot.settings || {}}
+        products={(snapshot?.products || []).filter((p: any) => !p.isPrivate)}
+        paymentLinks={snapshot?.paymentLinks || []}
+        gateways={snapshot?.gateways || []}
+        brandSettings={snapshot?.settings || {}}
         initialMode={checkoutPortalMode}
         initialTrackOrderId={initialTrackOrderId}
         initialPrivateLinkToken={initialPrivateLinkToken}
         onBackToAdmin={() => {
-          setActiveCheckoutToken(null);
-          if (window.location.pathname !== '/') {
-            window.history.pushState({}, '', '/');
-          }
+          setIsAdminRoute(true);
+          window.history.pushState({}, '', '/admin');
         }}
         onPaymentComplete={fetchPlatformData}
         onSwitchSession={(newToken) => setActiveCheckoutToken(newToken)}
@@ -560,7 +598,7 @@ export default function App() {
     );
   }
 
-  // Require Admin Authentication before showing the Admin Portal
+  // ADMIN PORTAL (/admin): Require Admin Authentication before showing the Admin Dashboard
   if (!adminSession?.authenticated && !currentUser) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between">
@@ -574,12 +612,12 @@ export default function App() {
                 <div>
                   <h1 className="text-base font-bold text-white">Allientic Checkout</h1>
                   <p className="text-xs font-mono text-emerald-400">
-                    checkout.xperiserv.in · Production Admin
+                    checkout.xperiserv.in · Admin Portal (/admin)
                   </p>
                 </div>
               </div>
               <span className="px-2.5 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-500/30 text-[10px] font-mono uppercase">
-                Production
+                Staff Only
               </span>
             </div>
 
@@ -629,28 +667,25 @@ export default function App() {
               </button>
             </form>
 
-            <div className="pt-4 border-t border-slate-800 flex items-center justify-between gap-2 text-xs">
+            <div className="pt-4 border-t border-slate-800 space-y-2 text-xs">
               <button
                 type="button"
                 onClick={() => {
-                  setCheckoutPortalMode('TRACK_ORDER');
-                  setActiveCheckoutToken('public_track_order');
-                }}
-                className="text-slate-400 hover:text-emerald-400 flex items-center gap-1"
-              >
-                <Search className="w-3.5 h-3.5" />
-                Customer Order Tracker
-              </button>
-              <button
-                type="button"
-                onClick={() => {
+                  setIsAdminRoute(false);
+                  setActiveCheckoutToken('public_storefront');
                   setCheckoutPortalMode('CHECKOUT');
-                  setActiveCheckoutToken('public_catalog');
+                  window.history.pushState({}, '', '/');
                 }}
-                className="text-emerald-400 hover:underline flex items-center gap-1"
+                className="w-full py-2.5 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 flex items-center justify-center gap-2 transition-colors font-medium"
               >
-                Public Storefront →
+                <ArrowLeft className="w-3.5 h-3.5 text-emerald-400" />
+                <span>← Return to Customer Storefront (/)</span>
               </button>
+
+              <div className="flex items-center justify-between text-slate-500 text-[11px] pt-1">
+                <span>Production Security Active</span>
+                <span className="font-mono text-emerald-400">admin@xperiserv.in</span>
+              </div>
             </div>
           </div>
         </div>
@@ -877,7 +912,14 @@ export default function App() {
     const data = await res.json();
     if (res.ok) {
       await fetchPlatformData();
-      showToast(`Added public product ${newProductForm.sku}`);
+      setNewProductForm((prev) => ({
+        ...prev,
+        sku: '',
+        name: '',
+        description: '',
+        unitPriceRupees: '',
+      }));
+      showToast(`Saved public product ${data.product?.sku || newProductForm.sku}`);
       if (activateImmediately && data.product) {
         await handleActivateProductCheckoutFromAdmin(data.product);
       }
@@ -910,22 +952,76 @@ export default function App() {
         maxQuantityPerOrder: Number(newPrivateProductForm.maxQuantityPerOrder || 5),
         generateInitialLink: true,
         linkMaxPurchases: Number(newPrivateProductForm.linkMaxPurchases || 1),
-        linkExpiryHours: Number(newPrivateProductForm.linkExpiryHours || 168),
+        linkExpiryHours: newPrivateProductForm.neverExpires ? 0 : Number(newPrivateProductForm.linkExpiryHours || 168),
+        neverExpires: Boolean(newPrivateProductForm.neverExpires),
       }),
     });
     const data = await res.json();
     if (res.ok) {
       await fetchPlatformData();
+      setNewPrivateProductForm((prev) => ({
+        ...prev,
+        sku: '',
+        name: '',
+        description: '',
+        unitPriceRupees: '',
+      }));
       showToast(
-        `Created Private Product ${data.product.sku} & generated link /pay/${data.paymentLink?.linkToken}`
+        `Saved Private Product ${data.product.sku} & generated link /pay/${data.paymentLink?.linkToken}`
       );
-      if (launchLinkImmediately && data.paymentLink?.linkToken && sessionsList[0]) {
+      if (launchLinkImmediately && data.paymentLink?.linkToken) {
         setInitialPrivateLinkToken(data.paymentLink.linkToken);
         setCheckoutPortalMode('PRIVATE_LINK');
-        setActiveCheckoutToken(sessionsList[0].sessionToken);
+        setActiveCheckoutToken(
+          sessionsList[0]?.sessionToken || `pay_${data.paymentLink.linkToken}`
+        );
       }
     } else {
       showToast(data.error || 'Failed to create private product');
+    }
+  };
+
+  const handleDeleteProduct = async (productId: number, sku: string, isPrivate: boolean) => {
+    const confirmed = window.confirm(
+      `Are you sure you want to permanently delete ${isPrivate ? 'Private' : 'Public'} Product "${sku}"?\n\nThis will remove the product catalogue entry and all attached purchase links.`
+    );
+    if (!confirmed) return;
+
+    try {
+      const res = await fetch(`/api/v1/products/${productId}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (res.ok) {
+        await fetchPlatformData();
+        showToast(data.message || `Deleted product ${sku}`);
+      } else {
+        showToast(data.error || 'Failed to delete product');
+      }
+    } catch {
+      showToast('Error deleting product');
+    }
+  };
+
+  const handleDeletePaymentLink = async (linkId: number, linkToken: string) => {
+    const confirmed = window.confirm(
+      `Delete purchase link /pay/${linkToken.slice(0, 16)}...?\n\nCustomers attempting to open this link will no longer be able to purchase.`
+    );
+    if (!confirmed) return;
+
+    try {
+      const res = await fetch(`/api/v1/payment-links/${linkId}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (res.ok) {
+        await fetchPlatformData();
+        showToast(data.message || 'Payment link deleted successfully');
+      } else {
+        showToast(data.error || 'Failed to delete payment link');
+      }
+    } catch {
+      showToast('Error deleting payment link');
     }
   };
 
@@ -957,7 +1053,8 @@ export default function App() {
         title: newPaymentLinkForm.title,
         allowQuantity: newPaymentLinkForm.allowQuantity,
         maxPurchases: Number(newPaymentLinkForm.maxPurchases || 1),
-        expiryHours: Number(newPaymentLinkForm.expiryHours || 168),
+        expiryHours: newPaymentLinkForm.neverExpires ? 0 : Number(newPaymentLinkForm.expiryHours || 168),
+        neverExpires: Boolean(newPaymentLinkForm.neverExpires),
         notifyEmail: newPaymentLinkForm.notifyEmail || undefined,
         notes: newPaymentLinkForm.notes,
       }),
@@ -973,7 +1070,7 @@ export default function App() {
 
   const handleUpdatePaymentLink = async (
     linkId: number,
-    action: 'ACTIVATE' | 'DEACTIVATE' | 'REVOKE' | 'REGENERATE'
+    action: 'ACTIVATE' | 'DEACTIVATE' | 'REVOKE' | 'REGENERATE' | 'NEVER_EXPIRE' | 'EXTEND_7_DAYS'
   ) => {
     const res = await fetch(`/api/v1/payment-links/${linkId}`, {
       method: 'PATCH',
@@ -983,7 +1080,17 @@ export default function App() {
     const data = await res.json();
     if (res.ok) {
       await fetchPlatformData();
-      showToast(`Payment link ${action.toLowerCase()}d (${data.paymentLink.linkToken.slice(0, 18)}...)`);
+      const actionLabels: Record<string, string> = {
+        NEVER_EXPIRE: 'set to Never Expire',
+        EXTEND_7_DAYS: 'extended by 7 days',
+        ACTIVATE: 'activated',
+        DEACTIVATE: 'deactivated',
+        REVOKE: 'revoked',
+        REGENERATE: 'regenerated',
+      };
+      showToast(`Payment link ${actionLabels[action] || action.toLowerCase()}`);
+    } else {
+      showToast(data.error || 'Failed to update payment link');
     }
   };
 
@@ -1332,17 +1439,15 @@ export default function App() {
             </button>
             <button
               onClick={() => {
+                setIsAdminRoute(false);
                 setCheckoutPortalMode('CHECKOUT');
-                setActiveCheckoutToken(
-                  sessionsList.find((s: any) => s.status === 'Open')?.sessionToken ||
-                    sessionsList[0]?.sessionToken ||
-                    'public_catalog'
-                );
+                setActiveCheckoutToken('public_storefront');
+                window.history.pushState({}, '', '/');
               }}
-              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-500 transition-colors whitespace-nowrap shrink-0"
+              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-500 transition-colors whitespace-nowrap shrink-0 shadow"
             >
               <ExternalLink className="w-3.5 h-3.5" />
-              Launch Customer Checkout
+              View Storefront (/)
             </button>
           </div>
         </header>
@@ -2356,16 +2461,26 @@ export default function App() {
                                 className="py-3 px-4 text-right"
                                 onClick={(e) => e.stopPropagation()}
                               >
-                                <button
-                                  type="button"
-                                  disabled={activatingProductId === p.id}
-                                  onClick={() => handleActivateProductCheckoutFromAdmin(p)}
-                                  className="px-3 py-1.5 text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg whitespace-nowrap"
-                                >
-                                  {activatingProductId === p.id
-                                    ? 'Activating...'
-                                    : 'Activate Customer Checkout →'}
-                                </button>
+                                <div className="flex items-center justify-end gap-1.5">
+                                  <button
+                                    type="button"
+                                    disabled={activatingProductId === p.id}
+                                    onClick={() => handleActivateProductCheckoutFromAdmin(p)}
+                                    className="px-3 py-1.5 text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg whitespace-nowrap"
+                                  >
+                                    {activatingProductId === p.id
+                                      ? 'Activating...'
+                                      : 'Activate Customer Checkout →'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteProduct(p.id, p.sku, false)}
+                                    className="p-1.5 text-rose-400 hover:text-white bg-rose-950/40 hover:bg-rose-900/60 border border-rose-900/40 rounded-lg transition-colors"
+                                    title={`Delete public product ${p.sku}`}
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
                               </td>
                             </tr>
                           ))}
@@ -4412,6 +4527,13 @@ export default function App() {
                                         >
                                           {prod.active ? 'Disable' : 'Enable'}
                                         </button>
+                                        <button
+                                          onClick={() => handleDeleteProduct(prod.id, prod.sku, true)}
+                                          className="p-1 text-rose-400 hover:text-white bg-rose-950/40 hover:bg-rose-900/60 border border-rose-900/40 rounded transition-colors"
+                                          title={`Delete private product ${prod.sku}`}
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
                                       </div>
                                       {activeLink && (
                                         <div className="text-[10px] font-mono text-slate-400 truncate max-w-[190px] ml-auto">
@@ -4591,19 +4713,41 @@ export default function App() {
                           />
                         </div>
                         <div>
-                          <label className="text-slate-400 block mb-1">Link Expiry (Hours)</label>
+                          <label className="text-slate-400 block mb-1">
+                            Link Expiry {newPrivateProductForm.neverExpires ? '(Indefinite)' : '(Hours)'}
+                          </label>
                           <input
                             type="number"
-                            value={newPrivateProductForm.linkExpiryHours}
+                            disabled={newPrivateProductForm.neverExpires}
+                            value={newPrivateProductForm.neverExpires ? '' : newPrivateProductForm.linkExpiryHours}
                             onChange={(e) =>
                               setNewPrivateProductForm({
                                 ...newPrivateProductForm,
                                 linkExpiryHours: e.target.value,
                               })
                             }
-                            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white font-mono"
+                            placeholder={newPrivateProductForm.neverExpires ? 'Never Expires' : '168'}
+                            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white font-mono disabled:opacity-50"
                           />
                         </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 pt-1 pb-1">
+                        <input
+                          type="checkbox"
+                          id="privateProdNeverExpires"
+                          checked={newPrivateProductForm.neverExpires}
+                          onChange={(e) =>
+                            setNewPrivateProductForm({
+                              ...newPrivateProductForm,
+                              neverExpires: e.target.checked,
+                            })
+                          }
+                          className="rounded border-slate-700 bg-slate-950 text-emerald-500 focus:ring-emerald-500"
+                        />
+                        <label htmlFor="privateProdNeverExpires" className="text-slate-300 font-medium cursor-pointer">
+                          Never Expires (Indefinite Purchase Link)
+                        </label>
                       </div>
 
                       <div className="flex items-center justify-between pt-1">
@@ -4706,9 +4850,13 @@ export default function App() {
                           <tbody className="divide-y divide-slate-800/70">
                             {paymentLinksList.map((lnk: any) => {
                               const fullUrl = `https://checkout.xperiserv.in/pay/${lnk.linkToken}`;
+                              const isNeverExpiring =
+                                lnk.neverExpires ||
+                                (lnk.expiresAt && new Date(lnk.expiresAt).getFullYear() >= 2090);
                               const isExpired =
-                                lnk.status === 'Expired' ||
-                                (lnk.expiresAt && new Date(lnk.expiresAt).getTime() <= Date.now());
+                                !isNeverExpiring &&
+                                (lnk.status === 'Expired' ||
+                                  (lnk.expiresAt && new Date(lnk.expiresAt).getTime() <= Date.now()));
                               return (
                                 <tr key={lnk.id} className="hover:bg-slate-800/30">
                                   <td className="py-3.5 px-4">
@@ -4742,16 +4890,20 @@ export default function App() {
                                   <td className="py-3.5 px-4">
                                     <span
                                       className={`inline-block px-2 py-0.5 text-[10px] font-mono rounded ${
-                                        lnk.status === 'Active' && !isExpired
+                                        isNeverExpiring
+                                          ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/30'
+                                          : lnk.status === 'Active' && !isExpired
                                           ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/30'
                                           : 'bg-rose-950 text-rose-300 border border-rose-500/30'
                                       }`}
                                     >
-                                      {isExpired && lnk.status === 'Active' ? 'Expired' : lnk.status}
+                                      {isNeverExpiring ? 'Never Expires' : isExpired && lnk.status === 'Active' ? 'Expired' : lnk.status}
                                     </span>
                                     <div className="text-[10px] font-mono text-slate-400 mt-1">
                                       Exp:{' '}
-                                      {lnk.expiresAt
+                                      {isNeverExpiring
+                                        ? 'Indefinite'
+                                        : lnk.expiresAt
                                         ? new Date(lnk.expiresAt).toLocaleDateString()
                                         : 'Never'}
                                     </div>
@@ -4790,17 +4942,42 @@ export default function App() {
                                           Activate
                                         </button>
                                       )}
+                                      {!isNeverExpiring && (
+                                        <>
+                                          <button
+                                            onClick={() => handleUpdatePaymentLink(lnk.id, 'NEVER_EXPIRE')}
+                                            className="px-2 py-0.5 text-[10px] bg-emerald-950/80 text-emerald-300 border border-emerald-600/40 rounded hover:bg-emerald-900/60"
+                                            title="Make this link never expire"
+                                          >
+                                            Never Expire
+                                          </button>
+                                          <button
+                                            onClick={() => handleUpdatePaymentLink(lnk.id, 'EXTEND_7_DAYS')}
+                                            className="px-2 py-0.5 text-[10px] bg-slate-800 text-slate-300 rounded hover:bg-slate-700"
+                                            title="Extend expiration by 7 days"
+                                          >
+                                            +7 Days
+                                          </button>
+                                        </>
+                                      )}
                                       <button
                                         onClick={() => handleUpdatePaymentLink(lnk.id, 'REGENERATE')}
                                         className="px-2 py-0.5 text-[10px] bg-slate-800 text-sky-300 rounded hover:bg-slate-700"
                                       >
-                                        Regenerate Token
+                                        Regenerate
                                       </button>
                                       <button
                                         onClick={() => handleUpdatePaymentLink(lnk.id, 'REVOKE')}
                                         className="px-2 py-0.5 text-[10px] bg-rose-950/70 text-rose-300 border border-rose-500/30 rounded hover:bg-rose-900/60"
                                       >
                                         Revoke
+                                      </button>
+                                      <button
+                                        onClick={() => handleDeletePaymentLink(lnk.id, lnk.linkToken)}
+                                        className="p-1 text-rose-400 hover:text-white bg-rose-950/40 hover:bg-rose-900/60 border border-rose-900/40 rounded transition-colors"
+                                        title="Delete payment link permanently"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
                                       </button>
                                     </div>
                                   </td>
@@ -4874,20 +5051,41 @@ export default function App() {
                           />
                         </div>
                         <div>
-                          <label className="text-slate-400 block mb-1">Expires In (Hours)</label>
+                          <label className="text-slate-400 block mb-1">
+                            Expires In {newPaymentLinkForm.neverExpires ? '(Indefinite)' : '(Hours)'}
+                          </label>
                           <input
                             type="number"
                             min={1}
-                            value={newPaymentLinkForm.expiryHours}
+                            disabled={newPaymentLinkForm.neverExpires}
+                            value={newPaymentLinkForm.neverExpires ? '' : newPaymentLinkForm.expiryHours}
                             onChange={(e) =>
                               setNewPaymentLinkForm({
                                 ...newPaymentLinkForm,
                                 expiryHours: e.target.value,
                               })
                             }
-                            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white font-mono"
+                            placeholder={newPaymentLinkForm.neverExpires ? 'Never Expires' : '168'}
+                            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-white font-mono disabled:opacity-50"
                           />
                         </div>
+                      </div>
+                      <div className="flex items-center gap-2 pt-0.5">
+                        <input
+                          type="checkbox"
+                          id="linkNeverExpiresCheck"
+                          checked={newPaymentLinkForm.neverExpires}
+                          onChange={(e) =>
+                            setNewPaymentLinkForm({
+                              ...newPaymentLinkForm,
+                              neverExpires: e.target.checked,
+                            })
+                          }
+                          className="rounded border-slate-700 bg-slate-950 text-emerald-500 focus:ring-emerald-500"
+                        />
+                        <label htmlFor="linkNeverExpiresCheck" className="text-slate-300 font-medium cursor-pointer">
+                          Never Expires (Indefinite Purchase Link)
+                        </label>
                       </div>
                       <div>
                         <label className="text-slate-400 block mb-1">Internal Audit Notes</label>
@@ -4918,78 +5116,8 @@ export default function App() {
               {/* 20. OFFICIAL XPERISERV.IN POLICIES & LEGAL COMPLIANCE MODULE */}
               {activeSection === 'policies' && (
                 <div className="space-y-6">
-                  <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-wrap items-center justify-between gap-4">
-                    <div className="space-y-1">
-                      <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                        <Scale className="w-4 h-4 text-emerald-400" />
-                        Official xperiserv.in Legal &amp; Compliance Policies (7/7 Verified)
-                      </h2>
-                      <p className="text-xs text-slate-400">
-                        Synchronized with <span className="font-mono text-emerald-400">https://xperiserv.in</span>{' '}
-                        (XperiServ Technologies, Cuttack Sadar, Odisha — 753011 · support@xperiserv.in).
-                        Displayed across checkout footer, payment page, order confirmation, and customer tracker.
-                      </p>
-                    </div>
-                    <a
-                      href="https://xperiserv.in"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-emerald-600 text-white rounded-lg hover:bg-emerald-500"
-                    >
-                      <ExternalLink className="w-3.5 h-3.5" />
-                      Visit xperiserv.in
-                    </a>
-                  </div>
-
-                  {/* All 7 Xperiserv.in Policies Cards */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {XPERISERV_POLICIES.map((pol) => (
-                      <div
-                        key={pol.id}
-                        className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3 flex flex-col justify-between"
-                      >
-                        <div className="space-y-2">
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <h3 className="text-sm font-bold text-white">{pol.title}</h3>
-                              <a
-                                href={pol.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-[11px] font-mono text-emerald-400 hover:underline flex items-center gap-1 mt-0.5"
-                              >
-                                {pol.url}
-                                <ExternalLink className="w-3 h-3" />
-                              </a>
-                            </div>
-                            <span className="px-2 py-0.5 text-[10px] font-mono bg-slate-950 text-slate-300 border border-slate-800 rounded">
-                              {pol.version}
-                            </span>
-                          </div>
-                          <p className="text-xs text-slate-300 leading-relaxed">{pol.summary}</p>
-                          <div className="space-y-1.5 pt-2 border-t border-slate-800/80">
-                            {pol.sections.map((cl, idx) => (
-                              <div key={idx} className="text-[11px] text-slate-400">
-                                <span className="font-semibold text-slate-200">{cl.heading}:</span>{' '}
-                                {cl.body}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                        <div className="pt-3 border-t border-slate-800 flex items-center justify-between text-[11px]">
-                          <span className="font-mono text-slate-500">
-                            Effective: {pol.effectiveDate}
-                          </span>
-                          <button
-                            onClick={() => setOpenPolicyModalId(pol.id)}
-                            className="text-emerald-400 hover:underline font-medium"
-                          >
-                            Open Interactive Policy Modal →
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                  {/* Interactive Merchant Policy Editor */}
+                  <MerchantPolicyEditor showToast={showToast} onSaved={fetchPlatformData} />
 
                   {/* Customer Order Policy Consent Audit Table */}
                   <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">

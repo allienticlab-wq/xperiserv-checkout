@@ -328,6 +328,37 @@ export async function ensureSchemaBootstrap() {
         updated_by TEXT,
         updated_at TIMESTAMP DEFAULT NOW()
       );
+
+      -- Ensure existing tables in upgraded environments (e.g. Easypanel) have all required columns
+      ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'Enterprise Software';
+      ALTER TABLE products ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'INR';
+      ALTER TABLE products ADD COLUMN IF NOT EXISTS tax_rate_percent INTEGER NOT NULL DEFAULT 18;
+      ALTER TABLE products ADD COLUMN IF NOT EXISTS hsn_sac_code TEXT DEFAULT '998314';
+      ALTER TABLE products ADD COLUMN IF NOT EXISTS is_private BOOLEAN NOT NULL DEFAULT false;
+      ALTER TABLE products ADD COLUMN IF NOT EXISTS stock_quantity INTEGER NOT NULL DEFAULT 50;
+      ALTER TABLE products ADD COLUMN IF NOT EXISTS shipping_charges_paise INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT;
+      ALTER TABLE products ADD COLUMN IF NOT EXISTS allow_quantity_selection BOOLEAN NOT NULL DEFAULT true;
+      ALTER TABLE products ADD COLUMN IF NOT EXISTS max_quantity_per_order INTEGER NOT NULL DEFAULT 10;
+      ALTER TABLE products ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true;
+      ALTER TABLE products ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
+
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_charges_paise INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_private_link_order BOOLEAN NOT NULL DEFAULT false;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_link_id INTEGER;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_link_token TEXT;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_policy_version TEXT DEFAULT 'XPERISERV-POL-2026.11-V2.4';
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_policy_timestamp TIMESTAMP DEFAULT NOW();
+
+      -- Synchronize SERIAL sequences to prevent primary key collisions
+      SELECT setval(pg_get_serial_sequence('products', 'id'), COALESCE((SELECT MAX(id) FROM products), 0) + 1, false);
+      SELECT setval(pg_get_serial_sequence('payment_links', 'id'), COALESCE((SELECT MAX(id) FROM payment_links), 0) + 1, false);
+      SELECT setval(pg_get_serial_sequence('orders', 'id'), COALESCE((SELECT MAX(id) FROM orders), 0) + 1, false);
+      SELECT setval(pg_get_serial_sequence('checkout_sessions', 'id'), COALESCE((SELECT MAX(id) FROM checkout_sessions), 0) + 1, false);
+      SELECT setval(pg_get_serial_sequence('payments', 'id'), COALESCE((SELECT MAX(id) FROM payments), 0) + 1, false);
+      SELECT setval(pg_get_serial_sequence('customers', 'id'), COALESCE((SELECT MAX(id) FROM customers), 0) + 1, false);
+      SELECT setval(pg_get_serial_sequence('audit_logs', 'id'), COALESCE((SELECT MAX(id) FROM audit_logs), 0) + 1, false);
+      SELECT setval(pg_get_serial_sequence('notification_logs', 'id'), COALESCE((SELECT MAX(id) FROM notification_logs), 0) + 1, false);
     `);
     isSchemaBootstrapped = true;
   } catch (err) {
@@ -956,10 +987,18 @@ export async function processCheckoutPayment(input: {
         .where(eq(paymentLinks.id, order.paymentLinkId));
       const pLink = linkRows[0];
       if (pLink) {
+        const isNeverExpiring = new Date(pLink.expiresAt).getFullYear() >= 2090;
+        if (pLink.status === 'Expired' && isNeverExpiring) {
+          pLink.status = 'Active';
+          await db
+            .update(paymentLinks)
+            .set({ status: 'Active', updatedAt: new Date() })
+            .where(eq(paymentLinks.id, pLink.id));
+        }
         if (pLink.status !== 'Active') {
           throw new Error(`Private purchase link is ${pLink.status} and cannot accept payments.`);
         }
-        if (new Date(pLink.expiresAt).getTime() < Date.now()) {
+        if (!isNeverExpiring && new Date(pLink.expiresAt).getTime() < Date.now()) {
           await db
             .update(paymentLinks)
             .set({ status: 'Expired', updatedAt: new Date() })

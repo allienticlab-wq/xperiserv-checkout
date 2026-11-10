@@ -165,6 +165,22 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     }
   }, [order?.id]);
 
+  // Dynamic Policies fetched from server (or fallback to defaults)
+  const [livePolicies, setLivePolicies] = useState<XperiservPolicy[]>(XPERISERV_POLICIES);
+  const [livePolicyVersion, setLivePolicyVersion] = useState<string>(XPERISERV_POLICY_VERSION);
+
+  useEffect(() => {
+    fetch('/api/v1/policies')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.policies && Array.isArray(data.policies)) {
+          setLivePolicies(data.policies);
+          if (data.version) setLivePolicyVersion(data.version);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (initialPrivateLinkToken) {
       setPrivateLinkToken(initialPrivateLinkToken);
@@ -624,7 +640,9 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                       <div className="flex justify-between">
                         <span className="text-slate-400">Link Expires</span>
                         <span className="font-mono text-slate-300">
-                          {new Date(pLink.expiresAt).toLocaleDateString()}
+                          {pLink.neverExpires || new Date(pLink.expiresAt).getFullYear() >= 2090
+                            ? 'Never Expires (Indefinite)'
+                            : new Date(pLink.expiresAt).toLocaleDateString()}
                         </span>
                       </div>
                     </div>
@@ -1783,11 +1801,13 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
       )}
 
       {/* Official Xperiserv.in Policy Footer on All Customer-Facing Pages */}
-      <XperiservPolicyFooter />
+      <XperiservPolicyFooter policies={livePolicies} version={livePolicyVersion} />
 
       {openPolicyModalId && (
         <XperiservPolicyModal
           initialPolicyId={openPolicyModalId}
+          policies={livePolicies}
+          version={livePolicyVersion}
           onClose={() => setOpenPolicyModalId(null)}
         />
       )}
