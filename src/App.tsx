@@ -105,12 +105,35 @@ const SIDEBAR_ITEMS: Array<{ id: AdminSection; label: string; icon: React.Compon
 
 export default function App() {
   const [activeSection, setActiveSection] = useState<AdminSection>('overview');
-  const [activeCheckoutToken, setActiveCheckoutToken] = useState<string | null>(null);
+  const [activeCheckoutToken, setActiveCheckoutToken] = useState<string | null>(() => {
+    const path = window.location.pathname;
+    const params = new URLSearchParams(window.location.search);
+    const payToken = path.startsWith('/pay/')
+      ? path.replace('/pay/', '').split('/')[0].trim()
+      : (params.get('pay') || '').trim();
+    if (payToken) return `pay_${payToken}`;
+    if (path.startsWith('/track-order')) return 'public_track_order';
+    if (path.startsWith('/checkout/')) return path.replace('/checkout/', '').split('/')[0].trim() || 'public_storefront';
+    return 'public_storefront';
+  });
   const [checkoutPortalMode, setCheckoutPortalMode] = useState<
     'CHECKOUT' | 'TRACK_ORDER' | 'PRIVATE_LINK'
-  >('CHECKOUT');
+  >(() => {
+    const path = window.location.pathname;
+    const params = new URLSearchParams(window.location.search);
+    if (path.startsWith('/pay/') || params.get('pay')) return 'PRIVATE_LINK';
+    if (path.startsWith('/track-order')) return 'TRACK_ORDER';
+    return 'CHECKOUT';
+  });
   const [initialTrackOrderId, setInitialTrackOrderId] = useState<string>('');
-  const [initialPrivateLinkToken, setInitialPrivateLinkToken] = useState<string>('');
+  const [initialPrivateLinkToken, setInitialPrivateLinkToken] = useState<string>(() => {
+    const path = window.location.pathname;
+    const params = new URLSearchParams(window.location.search);
+    if (path.startsWith('/pay/')) {
+      return path.replace('/pay/', '').split('/')[0].trim();
+    }
+    return (params.get('pay') || '').trim();
+  });
   const [activatingProductId, setActivatingProductId] = useState<number | null>(null);
   const [openPolicyModalId, setOpenPolicyModalId] = useState<XperiservPolicy['id'] | 'ALL' | null>(
     null
@@ -316,11 +339,15 @@ export default function App() {
   useEffect(() => {
     const syncRouteFromLocation = () => {
       const path = window.location.pathname;
+      const params = new URLSearchParams(window.location.search);
+      const queryPayToken = (params.get('pay') || '').trim();
       if (path.startsWith('/admin')) {
         setIsAdminRoute(true);
-      } else if (path.startsWith('/pay/')) {
+      } else if (path.startsWith('/pay/') || queryPayToken) {
         setIsAdminRoute(false);
-        const token = path.replace('/pay/', '').split('/')[0].trim();
+        const token = path.startsWith('/pay/')
+          ? path.replace('/pay/', '').split('/')[0].trim()
+          : queryPayToken;
         if (token) {
           setInitialPrivateLinkToken(token);
           setCheckoutPortalMode('PRIVATE_LINK');

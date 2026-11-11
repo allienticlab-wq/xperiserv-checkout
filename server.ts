@@ -2578,9 +2578,23 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
+    const indexHtmlPath = path.join(distPath, 'index.html');
     app.use(express.static(distPath));
-    app.get('*all', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+
+    // Explicit client-side routes for Private Purchase Links (/pay/:token), Admin Portal (/admin), Checkout, and Order Tracking
+    app.get(
+      ['/pay/:token', '/admin', '/checkout/:token', '/track-order'],
+      (_req, res) => {
+        res.sendFile(indexHtmlPath);
+      }
+    );
+
+    // Universal SPA fallback compatible with both Express 4 and Express 5
+    app.use((req, res, next) => {
+      if ((req.method === 'GET' || req.method === 'HEAD') && !req.path.startsWith('/api/')) {
+        return res.sendFile(indexHtmlPath);
+      }
+      next();
     });
   }
 

@@ -15,4 +15,4 @@ ENV PORT=3000
 
 EXPOSE 3000
 
-CMD ["sh", "-c", "npx drizzle-kit push --config=src/db/drizzle.config.ts || true; npx tsx server.ts"]
+CMD ["sh", "-c", "npx drizzle-kit push --force --config=src/db/drizzle.config.ts || true; npx tsx server.ts"]
