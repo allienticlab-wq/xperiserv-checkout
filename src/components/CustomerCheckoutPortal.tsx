@@ -361,6 +361,67 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     }
   };
 
+  // Helper: Submit Official PayU India Hosted Checkout HTML POST Form (https://secure.payu.in/_payment or https://test.payu.in/_payment)
+  const submitPayUHostedForm = (actionUrl: string, formFields: Record<string, string>) => {
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = actionUrl;
+    // Navigate directly in top-level browser tabs (e.g. checkout.xperiserv.in); use _blank only inside embedded preview iframes where PayU sets X-Frame-Options
+    try {
+      form.target = window.self === window.top ? '_self' : '_blank';
+    } catch {
+      form.target = '_blank';
+    }
+    form.style.display = 'none';
+
+    Object.entries(formFields).forEach(([name, value]) => {
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = name;
+      input.value = String(value ?? '');
+      form.appendChild(input);
+    });
+
+    document.body.appendChild(form);
+    form.submit();
+  };
+
+  // Detect return from PayU Hosted Checkout Callback (?payu_txnid=...&payu_status=...)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const payuTxnid = (params.get('payu_txnid') || '').trim();
+    const payuError = (params.get('payu_error') || '').trim();
+
+    if (payuError) {
+      setErrorMessage(payuError);
+    }
+
+    if (!payuTxnid) return;
+
+    fetch(`/api/v1/payments/by-txnid/${encodeURIComponent(payuTxnid)}`)
+      .then((res) => res.json())
+      .then(async (data) => {
+        if (!data?.payment) return;
+        if (data.payment.status === 'Captured') {
+          if (window.location.pathname.startsWith('/pay/')) {
+            setPrivatePaymentResult(data);
+          } else {
+            setPaymentResult(data);
+          }
+          if (data.order?.orderNumber) {
+            setTrackOrderIdInput(data.order.orderNumber);
+          }
+          await onPaymentComplete();
+        } else if (data.payment.status === 'Failed') {
+          setErrorMessage(
+            data.payment.errorMessage ||
+              'PayU payment was cancelled or declined. No amount was captured.'
+          );
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   // Regular Hosted Session Payment
   const handleExecutePayment = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -389,7 +450,6 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
               : selectedGatewayCode === 'PAYGLOCAL'
               ? 'PayGlocal Cross-Border & Domestic Checkout'
               : 'Zoho Payments Hosted Checkout',
-          simulateOutcome,
           customerName,
           customerEmail,
           customerMobile,
@@ -401,15 +461,19 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
       });
       const data = await res.json();
       if (!res.ok) {
-        setErrorMessage(data.error || 'Payment verification failed');
+        setErrorMessage(data.error || 'Payment initiation failed');
+        setProcessing(false);
+      } else if (data.redirectRequired && data.actionUrl && data.formFields) {
+        // Redirect browser to real PayU Hosted Checkout (https://secure.payu.in/_payment)
+        submitPayUHostedForm(data.actionUrl, data.formFields);
       } else {
         setPaymentResult(data);
         setTrackOrderIdInput(data.order?.orderNumber || order?.orderNumber || '');
         await onPaymentComplete();
+        setProcessing(false);
       }
     } catch (err: any) {
       setErrorMessage(err.message || 'Network error while communicating with payment gateway');
-    } finally {
       setProcessing(false);
     }
   };
@@ -440,22 +504,25 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
           shippingAddress: shippingAddressText,
           couponCode: couponInput.trim() || undefined,
           gatewayCode: selectedGatewayCode,
-          simulateOutcome,
           acceptedTermsAndPrivacy: true,
           acceptedPolicyVersion: XPERISERV_POLICY_VERSION,
         }),
       });
       const data = await res.json();
       if (!res.ok) {
-        setErrorMessage(data.error || 'Private purchase link payment failed');
+        setErrorMessage(data.error || 'Private purchase link payment initiation failed');
+        setProcessing(false);
+      } else if (data.redirectRequired && data.actionUrl && data.formFields) {
+        // Redirect browser to real PayU Hosted Checkout (https://secure.payu.in/_payment)
+        submitPayUHostedForm(data.actionUrl, data.formFields);
       } else {
         setPrivatePaymentResult(data);
         setTrackOrderIdInput(data.order?.orderNumber || '');
         await onPaymentComplete();
+        setProcessing(false);
       }
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to complete private link transaction');
-    } finally {
       setProcessing(false);
     }
   };

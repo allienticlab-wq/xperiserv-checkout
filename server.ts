@@ -27,6 +27,7 @@ import {
   createOrderAndCheckoutSession,
   ensureSeeded,
   getPlatformSnapshot,
+  handlePayUCallback,
   initiateRefund,
   processCheckoutPayment,
   purgeAllTestData,
@@ -52,6 +53,18 @@ const PORT = 3000;
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+function getRequestBaseUrl(req: express.Request): string {
+  const protoHeader = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+  const proto = protoHeader.split(',')[0].trim() || 'https';
+  const hostHeader =
+    (req.headers['x-forwarded-host'] as string) || req.get('host') || 'checkout.xperiserv.in';
+  const host = hostHeader.split(',')[0].trim();
+  if (host.includes('localhost') || host.includes('127.0.0.1')) {
+    return `http://${host}`;
+  }
+  return `${proto === 'http' && host.includes('xperiserv.in') ? 'https' : proto}://${host}`;
+}
 
 // Enterprise Security Headers (TLS/HSTS, CSP, Frame/XSS Protection)
 app.use((_req, res, next) => {
@@ -961,6 +974,8 @@ app.post('/api/v1/pay/:token/checkout', async (req, res) => {
           ? 'PayGlocal Cross-Border & Domestic Private Link Checkout'
           : 'PayU India Private Link Checkout',
       simulateOutcome: simulateOutcome || 'SUCCESS',
+      forceSimulate: Boolean(req.body.forceSimulate),
+      callbackBaseUrl: getRequestBaseUrl(req),
       customerName,
       customerEmail,
       customerMobile,
@@ -1271,6 +1286,8 @@ app.post('/api/v1/checkout/sessions/:id/pay', async (req, res) => {
           ? 'PayGlocal Cross-Border & Domestic Checkout'
           : 'PayU India Hosted Checkout'),
       simulateOutcome: simulateOutcome || 'SUCCESS',
+      forceSimulate: Boolean(req.body.forceSimulate),
+      callbackBaseUrl: getRequestBaseUrl(req),
       customerName,
       customerEmail,
       customerMobile,
@@ -1282,6 +1299,63 @@ app.post('/api/v1/checkout/sessions/:id/pay', async (req, res) => {
     res.json(result);
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'Checkout payment processing failed' });
+  }
+});
+
+// Official PayU India Hosted Checkout Callback (surl / furl POST & Webhook)
+const payuCallbackHandler = async (req: express.Request, res: express.Response) => {
+  try {
+    const payload = { ...(req.query || {}), ...(req.body || {}) };
+    const result = await handlePayUCallback(payload);
+    const wantsJson =
+      req.headers.accept &&
+      req.headers.accept.includes('application/json') &&
+      !req.headers.accept.includes('text/html');
+    if (wantsJson) {
+      return res.json(result);
+    }
+    return res.redirect(303, result.redirectPath);
+  } catch (error: any) {
+    console.error('PayU callback error:', error);
+    return res.redirect(
+      303,
+      `/?payu_status=failure&payu_error=${encodeURIComponent(error.message || 'PayU callback verification failed')}`
+    );
+  }
+};
+
+app.post('/api/v1/callbacks/payu', payuCallbackHandler);
+app.get('/api/v1/callbacks/payu', payuCallbackHandler);
+app.post('/api/v1/webhooks/payu', payuCallbackHandler);
+
+// Fetch Verified Payment + Order + Session by Transaction ID (for post-redirect receipt display)
+app.get('/api/v1/payments/by-txnid/:txnid', async (req, res) => {
+  try {
+    await ensureSeeded();
+    const txnid = String(req.params.txnid || '').trim();
+    const payRows = await db
+      .select()
+      .from(payments)
+      .where(eq(payments.transactionId, txnid));
+    const payment = payRows[0];
+    if (!payment) {
+      return res.status(404).json({ error: 'Payment transaction not found' });
+    }
+    const ordRows = await db
+      .select()
+      .from(orders)
+      .where(eq(orders.id, payment.orderId));
+    const order = ordRows[0] || null;
+    const sessRows = payment.checkoutSessionId
+      ? await db
+          .select()
+          .from(checkoutSessions)
+          .where(eq(checkoutSessions.id, payment.checkoutSessionId))
+      : [];
+    const checkoutSession = sessRows[0] || null;
+    res.json({ payment, order, checkoutSession });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to look up payment transaction' });
   }
 });
 

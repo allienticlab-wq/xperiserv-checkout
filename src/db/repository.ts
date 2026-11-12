@@ -655,6 +655,8 @@ export async function processCheckoutPayment(input: {
   paymentMethod?: string;
   instrumentDetail?: string;
   simulateOutcome?: 'SUCCESS' | 'FAILURE' | 'PENDING';
+  forceSimulate?: boolean;
+  callbackBaseUrl?: string;
   couponCode?: string;
   customerName?: string;
   customerEmail?: string;
@@ -756,13 +758,129 @@ export async function processCheckoutPayment(input: {
     const finalPolicyVersion =
       input.acceptedPolicyVersion || order.acceptedPolicyVersion || XPERISERV_POLICY_VERSION;
 
-    const rawSavedSecret = (gateway.encryptedSecretOrSalt || '').replace(/^enc_aes256_/, '');
+    const rawSavedSecret = (gateway.encryptedSecretOrSalt || '').replace(/^enc_aes256_/, '').trim();
+    const baseUrl = (input.callbackBaseUrl || 'https://checkout.xperiserv.in').replace(/\/+$/, '');
 
     if (input.gatewayCode === 'PAYU') {
+      const configuredKey = (gateway.publicKeyOrClientId || process.env.PAYU_MERCHANT_KEY || '').trim();
+      const configuredSalt = (rawSavedSecret || process.env.PAYU_MERCHANT_SALT || '').trim();
+
+      if (!input.forceSimulate) {
+        if (!configuredKey || !configuredSalt) {
+          throw new Error(
+            'PayU Merchant Key and Merchant Salt are not configured. Please enter and save your PayU Production credentials in Admin Portal → 8. Payment Gateways.'
+          );
+        }
+
+        const payuConfig = {
+          environment: (gateway.environment as 'SANDBOX' | 'PRODUCTION') || 'PRODUCTION',
+          merchantKey: configuredKey,
+          merchantSalt: configuredSalt,
+        };
+
+        const callbackUrl = `${baseUrl}/api/v1/callbacks/payu`;
+        const initPayload = PayUIndiaAdapter.buildCheckoutPayload(
+          {
+            txnid,
+            amountRupees: amountRupeesStr,
+            productinfo: order.orderNumber,
+            firstname: finalCustomerName,
+            email: finalCustomerEmail,
+            phone: finalCustomerMobile,
+            surl: callbackUrl,
+            furl: callbackUrl,
+            udf1: session.sessionToken,
+            udf2: order.paymentLinkToken || '',
+          },
+          payuConfig
+        );
+
+        const insertedPendingPayment = await db
+          .insert(payments)
+          .values({
+            transactionId: txnid,
+            orderId: order.id,
+            checkoutSessionId: session.id,
+            customerId: order.customerId,
+            gatewayCode: 'PAYU',
+            gatewayTransactionId: null,
+            gatewayReferenceId: null,
+            paymentMethod: resolvedMethod,
+            paymentInstrumentDetail: resolvedInstrument,
+            amountPaise: order.totalAmountPaise,
+            refundedAmountPaise: 0,
+            currency: order.currency,
+            status: 'Pending',
+            signatureVerified: false,
+            requestHash: initPayload.requestHash,
+            responseHash: null,
+            errorCode: null,
+            errorMessage: null,
+            idempotencyKey: `idem_${txnid}`,
+            settlementStatus: 'Unsettled',
+            rawGatewayLogJson: JSON.stringify({
+              gateway: 'PAYU',
+              environment: payuConfig.environment,
+              actionUrl: initPayload.actionUrl,
+              txnid,
+              status: 'initiated_redirect',
+              requestHash: initPayload.requestHash,
+            }),
+          })
+          .returning();
+
+        const currentTimeline = JSON.parse(order.timelineJson || '[]');
+        currentTimeline.push({
+          timestamp: new Date().toISOString(),
+          actor: 'PayU India Gateway Initiator',
+          action: 'Redirected to PayU Hosted Checkout',
+          status: 'Payment Initiated',
+          note: `${txnid} redirected to ${initPayload.actionUrl} (${payuConfig.environment}) — awaiting customer payment & SHA-512 callback`,
+        });
+
+        const updatedPendingOrder = await db
+          .update(orders)
+          .set({
+            customerName: finalCustomerName,
+            customerEmail: finalCustomerEmail,
+            customerMobile: finalCustomerMobile,
+            billingAddress: input.billingAddress || order.billingAddress,
+            shippingAddress: input.shippingAddress || order.shippingAddress,
+            orderStatus: 'Payment Initiated',
+            paymentStatus: 'Pending',
+            acceptedPolicyVersion: finalPolicyVersion,
+            acceptedPolicyTimestamp: new Date(),
+            timelineJson: JSON.stringify(currentTimeline),
+            updatedAt: new Date(),
+          })
+          .where(eq(orders.id, order.id))
+          .returning();
+
+        const updatedPendingSession = await db
+          .update(checkoutSessions)
+          .set({
+            status: 'Processing',
+            selectedGateway: 'PAYU',
+          })
+          .where(eq(checkoutSessions.id, session.id))
+          .returning();
+
+        return {
+          redirectRequired: true,
+          gateway: 'PAYU',
+          environment: payuConfig.environment,
+          actionUrl: initPayload.actionUrl,
+          formFields: initPayload.formFields,
+          payment: insertedPendingPayment[0],
+          order: updatedPendingOrder[0],
+          checkoutSession: updatedPendingSession[0],
+        };
+      }
+
       const payuConfig = {
         environment: (gateway.environment as 'SANDBOX' | 'PRODUCTION') || 'PRODUCTION',
-        merchantKey: gateway.publicKeyOrClientId || process.env.PAYU_MERCHANT_KEY || 'PAYU_LIVE_KEY',
-        merchantSalt: rawSavedSecret || process.env.PAYU_MERCHANT_SALT || 'PAYU_LIVE_SALT',
+        merchantKey: configuredKey || 'PAYU_LIVE_KEY',
+        merchantSalt: configuredSalt || 'PAYU_LIVE_SALT',
       };
       const initPayload = PayUIndiaAdapter.buildCheckoutPayload(
         {
@@ -772,8 +890,8 @@ export async function processCheckoutPayment(input: {
           firstname: finalCustomerName,
           email: finalCustomerEmail,
           phone: finalCustomerMobile,
-          surl: `https://checkout.xperiserv.in/api/v1/webhooks/payu`,
-          furl: `https://checkout.xperiserv.in/api/v1/webhooks/payu`,
+          surl: `${baseUrl}/api/v1/callbacks/payu`,
+          furl: `${baseUrl}/api/v1/callbacks/payu`,
         },
         payuConfig
       );
@@ -1350,3 +1468,265 @@ export async function initiateRefund(input: {
     throw new Error(error.message || 'Failed to initiate refund.', { cause: error });
   }
 }
+
+export async function handlePayUCallback(rawPayload: Record<string, any>) {
+  await ensureSeeded();
+  const txnid = String(rawPayload.txnid || '').trim();
+  if (!txnid) {
+    throw new Error('Missing txnid in PayU callback payload.');
+  }
+
+  const foundPayments = await db
+    .select()
+    .from(payments)
+    .where(eq(payments.transactionId, txnid));
+  const payment = foundPayments[0];
+  if (!payment) {
+    throw new Error(`Payment transaction ${txnid} not found.`);
+  }
+
+  const foundOrders = await db.select().from(orders).where(eq(orders.id, payment.orderId));
+  const order = foundOrders[0];
+  if (!order) {
+    throw new Error(`Order for payment ${txnid} not found.`);
+  }
+
+  const foundSessions = payment.checkoutSessionId
+    ? await db
+        .select()
+        .from(checkoutSessions)
+        .where(eq(checkoutSessions.id, payment.checkoutSessionId))
+    : [];
+  const session = foundSessions[0] || null;
+
+  const gateways = await db
+    .select()
+    .from(paymentGateways)
+    .where(eq(paymentGateways.code, 'PAYU'));
+  const gateway = gateways[0];
+  const rawSavedSecret = (gateway?.encryptedSecretOrSalt || '').replace(/^enc_aes256_/, '').trim();
+
+  const payuConfig = {
+    environment: ((gateway?.environment as 'SANDBOX' | 'PRODUCTION') || 'PRODUCTION'),
+    merchantKey: (gateway?.publicKeyOrClientId || process.env.PAYU_MERCHANT_KEY || '').trim(),
+    merchantSalt: (rawSavedSecret || process.env.PAYU_MERCHANT_SALT || '').trim(),
+  };
+
+  const callbackStatus = String(rawPayload.status || 'failure').toLowerCase() as
+    | 'success'
+    | 'failure'
+    | 'pending';
+
+  const callbackPayload = {
+    key: String(rawPayload.key || payuConfig.merchantKey),
+    txnid,
+    amount: String(rawPayload.amount || (order.totalAmountPaise / 100).toFixed(2)),
+    productinfo: String(rawPayload.productinfo || order.orderNumber),
+    firstname: String(rawPayload.firstname || order.customerName),
+    email: String(rawPayload.email || order.customerEmail),
+    status: callbackStatus,
+    mihpayid: rawPayload.mihpayid ? String(rawPayload.mihpayid) : undefined,
+    mode: rawPayload.mode ? String(rawPayload.mode) : undefined,
+    bank_ref_num: rawPayload.bank_ref_num ? String(rawPayload.bank_ref_num) : undefined,
+    bankcode: rawPayload.bankcode ? String(rawPayload.bankcode) : undefined,
+    error: rawPayload.error ? String(rawPayload.error) : undefined,
+    error_Message:
+      rawPayload.error_Message || rawPayload.field9
+        ? String(rawPayload.error_Message || rawPayload.field9)
+        : undefined,
+    udf1: rawPayload.udf1 ? String(rawPayload.udf1) : '',
+    udf2: rawPayload.udf2 ? String(rawPayload.udf2) : '',
+    udf3: rawPayload.udf3 ? String(rawPayload.udf3) : '',
+    udf4: rawPayload.udf4 ? String(rawPayload.udf4) : '',
+    udf5: rawPayload.udf5 ? String(rawPayload.udf5) : '',
+    additionalCharges: rawPayload.additionalCharges ? String(rawPayload.additionalCharges) : undefined,
+    hash: String(rawPayload.hash || ''),
+  };
+
+  const signatureVerified = PayUIndiaAdapter.verifyCallbackHash(callbackPayload, payuConfig);
+  const isSuccess = callbackStatus === 'success' && signatureVerified;
+
+  // Idempotency guard: if already captured, return existing captured state and redirect path
+  const linkToken = order.paymentLinkToken || callbackPayload.udf2 || '';
+  const sessionToken = session?.sessionToken || callbackPayload.udf1 || 'public_storefront';
+  const redirectPath = linkToken
+    ? `/pay/${encodeURIComponent(linkToken)}?payu_txnid=${encodeURIComponent(txnid)}&payu_status=${isSuccess ? 'success' : 'failure'}`
+    : `/checkout/${encodeURIComponent(sessionToken)}?payu_txnid=${encodeURIComponent(txnid)}&payu_status=${isSuccess ? 'success' : 'failure'}`;
+
+  if (payment.status === 'Captured') {
+    return {
+      verified: true,
+      status: 'success',
+      payment,
+      order,
+      checkoutSession: session,
+      redirectPath,
+    };
+  }
+
+  const nextPaymentStatus = isSuccess
+    ? 'Captured'
+    : callbackStatus === 'pending' && signatureVerified
+    ? 'Pending'
+    : 'Failed';
+  const nextOrderStatus = isSuccess
+    ? 'Paid'
+    : nextPaymentStatus === 'Pending'
+    ? 'Payment Initiated'
+    : 'Payment Failed';
+  const nextSessionStatus = isSuccess
+    ? 'Completed'
+    : nextPaymentStatus === 'Pending'
+    ? 'Processing'
+    : 'Open';
+
+  const errorMessage = isSuccess
+    ? null
+    : !signatureVerified
+    ? 'PayU callback SHA-512 reverse hash verification failed.'
+    : callbackPayload.error_Message || 'Payment declined or cancelled by user on PayU.';
+
+  const updatedPayment = await db
+    .update(payments)
+    .set({
+      gatewayTransactionId: callbackPayload.mihpayid || payment.gatewayTransactionId,
+      gatewayReferenceId: callbackPayload.bank_ref_num || payment.gatewayReferenceId,
+      paymentMethod: callbackPayload.mode || payment.paymentMethod || 'PAYU_HOSTED',
+      status: nextPaymentStatus,
+      signatureVerified,
+      responseHash: callbackPayload.hash || null,
+      errorCode: isSuccess ? null : callbackPayload.error || 'PAYU_FAILED',
+      errorMessage,
+      rawGatewayLogJson: JSON.stringify(rawPayload),
+      updatedAt: new Date(),
+    })
+    .where(eq(payments.id, payment.id))
+    .returning();
+
+  const currentTimeline = JSON.parse(order.timelineJson || '[]');
+  currentTimeline.push({
+    timestamp: new Date().toISOString(),
+    actor: 'PayU India Callback Verifier',
+    action: isSuccess
+      ? 'Payment Verified & Captured (PayU Callback)'
+      : 'PayU Payment Failed / Cancelled',
+    status: nextOrderStatus,
+    note: `${txnid} (mihpayid: ${callbackPayload.mihpayid || 'N/A'}) — Status: ${callbackStatus} · Reverse Hash Verified: ${signatureVerified}${errorMessage ? ` · ${errorMessage}` : ''}`,
+  });
+
+  const updatedOrder = await db
+    .update(orders)
+    .set({
+      orderStatus: nextOrderStatus,
+      paymentStatus: nextPaymentStatus,
+      timelineJson: JSON.stringify(currentTimeline),
+      updatedAt: new Date(),
+    })
+    .where(eq(orders.id, order.id))
+    .returning();
+
+  let updatedSession = session;
+  if (session) {
+    const sessRows = await db
+      .update(checkoutSessions)
+      .set({
+        status: nextSessionStatus,
+        completedAt: isSuccess ? new Date() : null,
+      })
+      .where(eq(checkoutSessions.id, session.id))
+      .returning();
+    updatedSession = sessRows[0];
+  }
+
+  if (isSuccess && order.paymentLinkId) {
+    const linkRows = await db
+      .select()
+      .from(paymentLinks)
+      .where(eq(paymentLinks.id, order.paymentLinkId));
+    const pLink = linkRows[0];
+    if (pLink) {
+      const newCount = pLink.purchasesCount + 1;
+      const newStatus = newCount >= pLink.maxPurchases ? 'Exhausted' : pLink.status;
+      await db
+        .update(paymentLinks)
+        .set({
+          purchasesCount: newCount,
+          status: newStatus,
+          updatedAt: new Date(),
+        })
+        .where(eq(paymentLinks.id, pLink.id));
+
+      const prodRows = await db
+        .select()
+        .from(products)
+        .where(eq(products.id, pLink.productId));
+      if (prodRows[0]) {
+        let orderedQty = 1;
+        try {
+          const parsedItems = JSON.parse(order.itemsJson || '[]');
+          orderedQty = Number(parsedItems[0]?.quantity || 1);
+        } catch {
+          orderedQty = 1;
+        }
+        await db
+          .update(products)
+          .set({
+            stockQuantity: Math.max(0, prodRows[0].stockQuantity - orderedQty),
+          })
+          .where(eq(products.id, prodRows[0].id));
+      }
+    }
+  }
+
+  if (isSuccess && order.customerId) {
+    const custRows = await db
+      .select()
+      .from(customers)
+      .where(eq(customers.id, order.customerId));
+    if (custRows[0]) {
+      await db
+        .update(customers)
+        .set({
+          totalSpentPaise: custRows[0].totalSpentPaise + order.totalAmountPaise,
+          updatedAt: new Date(),
+        })
+        .where(eq(customers.id, order.customerId));
+    }
+  }
+
+  const webhookEvent = isSuccess ? 'payment.success' : 'payment.failed';
+  await WebhookService.dispatchEvent(webhookEvent, {
+    transactionId: txnid,
+    orderNumber: order.orderNumber,
+    gateway: 'PAYU',
+    gatewayTransactionId: callbackPayload.mihpayid || null,
+    paymentMethod: callbackPayload.mode || 'PAYU_HOSTED',
+    amountPaise: order.totalAmountPaise,
+    currency: order.currency,
+    signatureVerified,
+    isPrivateLinkOrder: order.isPrivateLinkOrder,
+  });
+
+  await NotificationService.sendAndLog({
+    eventType: webhookEvent,
+    recipientEmail: order.customerEmail,
+    customerName: order.customerName,
+    orderNumber: order.orderNumber,
+    amountFormatted: `₹${(order.totalAmountPaise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`,
+    transactionId: txnid,
+    gatewayName: `PAYU (${callbackPayload.mode || 'Hosted Checkout'})`,
+    extraNote: isSuccess
+      ? `PayU Reference: ${callbackPayload.mihpayid || txnid} · Reverse SHA-512 Hash Verified`
+      : `PayU Error: ${errorMessage}`,
+  });
+
+  return {
+    verified: signatureVerified,
+    status: isSuccess ? 'success' : 'failure',
+    payment: updatedPayment[0],
+    order: updatedOrder[0],
+    checkoutSession: updatedSession,
+    redirectPath,
+  };
+}
+
