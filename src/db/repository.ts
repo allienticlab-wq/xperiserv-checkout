@@ -570,6 +570,34 @@ export async function createOrderAndCheckoutSession(input: {
       subtotalPaise + taxAmountPaise + shippingChargesPaise - discountAmountPaise
     );
 
+    // Parse or enrich billingAddress JSON with GSTIN, Company Name, IP, and Multi-Currency info
+    let enrichedBillingObj: Record<string, any> = {
+      line1: 'Enterprise Billing Desk',
+      city: 'Bengaluru',
+      state: 'Karnataka',
+      postalCode: '560103',
+      country: 'India',
+    };
+    if (input.billingAddress) {
+      try {
+        const parsed = JSON.parse(input.billingAddress);
+        if (parsed && typeof parsed === 'object') {
+          enrichedBillingObj = { ...enrichedBillingObj, ...parsed };
+        } else {
+          enrichedBillingObj.line1 = String(input.billingAddress);
+        }
+      } catch {
+        enrichedBillingObj.line1 = String(input.billingAddress);
+      }
+    }
+    const cleanGstin = (input.gstin || enrichedBillingObj.gstin || '').toString().trim().toUpperCase();
+    const cleanCompany = (input.companyName || enrichedBillingObj.companyName || '').toString().trim();
+    if (cleanGstin) enrichedBillingObj.gstin = cleanGstin;
+    if (cleanCompany) enrichedBillingObj.companyName = cleanCompany;
+    enrichedBillingObj.merchantGstin = enrichedBillingObj.merchantGstin || '29AABCA8921K1Z5';
+
+    const serializedBilling = JSON.stringify(enrichedBillingObj);
+
     // Upsert or match customer by email
     const existingCustomers = await db
       .select()
@@ -581,6 +609,11 @@ export async function createOrderAndCheckoutSession(input: {
       await db
         .update(customers)
         .set({
+          name: input.customerName || existingCustomers[0].name,
+          mobile: input.customerMobile || existingCustomers[0].mobile,
+          companyName: cleanCompany || existingCustomers[0].companyName,
+          gstin: cleanGstin || existingCustomers[0].gstin,
+          billingAddress: serializedBilling,
           totalOrders: existingCustomers[0].totalOrders + 1,
           updatedAt: new Date(),
         })
@@ -594,18 +627,10 @@ export async function createOrderAndCheckoutSession(input: {
           name: input.customerName,
           email: input.customerEmail,
           mobile: input.customerMobile,
-          companyName: input.companyName || null,
-          gstin: input.gstin || null,
-          billingAddress:
-            input.billingAddress ||
-            JSON.stringify({
-              line1: 'Corporate Office',
-              city: 'Bengaluru',
-              state: 'Karnataka',
-              postalCode: '560001',
-              country: 'India',
-            }),
-          shippingAddress: input.shippingAddress || input.billingAddress || null,
+          companyName: cleanCompany || null,
+          gstin: cleanGstin || null,
+          billingAddress: serializedBilling,
+          shippingAddress: input.shippingAddress || serializedBilling,
           totalOrders: 1,
           totalSpentPaise: 0,
         })
@@ -626,7 +651,7 @@ export async function createOrderAndCheckoutSession(input: {
           ? 'Private Link Order & Session Initialized'
           : 'Order & Checkout Session Created',
         status: 'Pending Payment',
-        note: `Session ${sessionToken} generated for ₹${(totalAmountPaise / 100).toFixed(2)} · Policy ${policyVersion}`,
+        note: `Session ${sessionToken} generated for ₹${(totalAmountPaise / 100).toFixed(2)}${cleanGstin ? ` · GSTIN ${cleanGstin}` : ''} · Policy ${policyVersion}`,
       },
     ];
 
@@ -639,16 +664,8 @@ export async function createOrderAndCheckoutSession(input: {
         customerName: input.customerName,
         customerEmail: input.customerEmail,
         customerMobile: input.customerMobile,
-        billingAddress:
-          input.billingAddress ||
-          JSON.stringify({
-            line1: 'Enterprise Billing Desk',
-            city: 'Bengaluru',
-            state: 'Karnataka',
-            postalCode: '560103',
-            country: 'India',
-          }),
-        shippingAddress: input.shippingAddress || input.billingAddress || null,
+        billingAddress: serializedBilling,
+        shippingAddress: input.shippingAddress || serializedBilling,
         itemsJson: JSON.stringify(input.items),
         subtotalPaise,
         taxAmountPaise,
@@ -1318,16 +1335,33 @@ export async function processCheckoutPayment(input: {
       }
     }
 
-    if (outcome === 'SUCCESS' && order.customerId) {
+    if (order.customerId) {
       const custRows = await db
         .select()
         .from(customers)
         .where(eq(customers.id, order.customerId));
       if (custRows[0]) {
+        let parsedBill: Record<string, any> = {};
+        try {
+          parsedBill = JSON.parse(input.billingAddress || order.billingAddress || '{}');
+        } catch {
+          parsedBill = {};
+        }
         await db
           .update(customers)
           .set({
-            totalSpentPaise: custRows[0].totalSpentPaise + order.totalAmountPaise,
+            name: finalCustomerName || custRows[0].name,
+            email: finalCustomerEmail || custRows[0].email,
+            mobile: finalCustomerMobile || custRows[0].mobile,
+            gstin: parsedBill.gstin ? String(parsedBill.gstin).toUpperCase() : custRows[0].gstin,
+            companyName: parsedBill.companyName
+              ? String(parsedBill.companyName)
+              : custRows[0].companyName,
+            billingAddress: input.billingAddress || order.billingAddress || custRows[0].billingAddress,
+            totalSpentPaise:
+              outcome === 'SUCCESS'
+                ? custRows[0].totalSpentPaise + order.totalAmountPaise
+                : custRows[0].totalSpentPaise,
             updatedAt: new Date(),
           })
           .where(eq(customers.id, order.customerId));

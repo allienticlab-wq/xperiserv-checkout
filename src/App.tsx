@@ -11,6 +11,8 @@ import {
   CreateOrderModal,
   RefundModal,
   InvoicePreviewModal,
+  EditOrderModal,
+  EditProductModal,
 } from './components/AdminModals.tsx';
 import {
   XperiservPolicyFooter,
@@ -181,6 +183,7 @@ export default function App() {
   // Filters & Search
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [orderStatusFilter, setOrderStatusFilter] = useState<string>('ALL');
+  const [orderTypeFilter, setOrderTypeFilter] = useState<'ALL' | 'PUBLIC' | 'PRIVATE'>('ALL');
   const [gatewayFilter, setGatewayFilter] = useState<string>('ALL');
   const [revenueTimeframe, setRevenueTimeframe] = useState<'DAILY' | 'WEEKLY' | 'MONTHLY'>('MONTHLY');
 
@@ -188,6 +191,8 @@ export default function App() {
   const [showCreateOrderModal, setShowCreateOrderModal] = useState<boolean>(false);
   const [refundTargetPayment, setRefundTargetPayment] = useState<any | null>(null);
   const [invoicePreviewOrder, setInvoicePreviewOrder] = useState<any | null>(null);
+  const [editingOrder, setEditingOrder] = useState<any | null>(null);
+  const [editingProduct, setEditingProduct] = useState<any | null>(null);
   const [selectedOrderDetail, setSelectedOrderDetail] = useState<any | null>(null);
   const [generatedKeyResult, setGeneratedKeyResult] = useState<any | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -1960,16 +1965,41 @@ export default function App() {
               {activeSection === 'orders' && (
                 <div className="space-y-5">
                   <div className="flex flex-wrap items-center justify-between gap-4">
-                    <div className="flex items-center gap-3 flex-1 min-w-[260px]">
+                    <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[260px]">
                       <div className="relative flex-1 max-w-sm">
                         <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
                         <input
                           type="text"
                           value={searchQuery}
                           onChange={(e) => setSearchQuery(e.target.value)}
-                          placeholder="Search order #, customer, email, PO..."
+                          placeholder="Search order #, customer, email, GSTIN, PO..."
                           className="w-full bg-slate-900 border border-slate-800 rounded-lg pl-8 pr-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
                         />
+                      </div>
+                      <div className="flex items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-lg">
+                        {[
+                          { id: 'ALL', label: `All (${ordersList.length})` },
+                          {
+                            id: 'PUBLIC',
+                            label: `Public (${ordersList.filter((o: any) => !o.isPrivateLinkOrder).length})`,
+                          },
+                          {
+                            id: 'PRIVATE',
+                            label: `Private Link (${ordersList.filter((o: any) => o.isPrivateLinkOrder).length})`,
+                          },
+                        ].map((tab) => (
+                          <button
+                            key={tab.id}
+                            onClick={() => setOrderTypeFilter(tab.id as 'ALL' | 'PUBLIC' | 'PRIVATE')}
+                            className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                              orderTypeFilter === tab.id
+                                ? 'bg-emerald-600 text-white'
+                                : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            {tab.label}
+                          </button>
+                        ))}
                       </div>
                       <div className="flex items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-lg">
                         {['ALL', 'Paid', 'Pending Payment', 'Partially Refunded', 'Failed'].map(
@@ -2013,8 +2043,8 @@ export default function App() {
                       <table className="w-full text-left text-xs">
                         <thead>
                           <tr className="border-b border-slate-800 bg-slate-950/50 text-slate-400">
-                            <th className="py-3 px-4">Order # / Ref</th>
-                            <th className="py-3 px-4">Customer</th>
+                            <th className="py-3 px-4">Order # / Type / Ref</th>
+                            <th className="py-3 px-4">Customer &amp; GSTIN</th>
                             <th className="py-3 px-4">Order Status</th>
                             <th className="py-3 px-4">Payment Status</th>
                             <th className="py-3 px-4">Fulfillment</th>
@@ -2027,19 +2057,32 @@ export default function App() {
                             .filter((o: any) => {
                               const matchesStatus =
                                 orderStatusFilter === 'ALL' || o.orderStatus === orderStatusFilter;
+                              const matchesType =
+                                orderTypeFilter === 'ALL' ||
+                                (orderTypeFilter === 'PRIVATE'
+                                  ? Boolean(o.isPrivateLinkOrder)
+                                  : !o.isPrivateLinkOrder);
                               const q = searchQuery.toLowerCase();
                               const matchesQuery =
                                 !q ||
                                 o.orderNumber.toLowerCase().includes(q) ||
                                 o.customerName.toLowerCase().includes(q) ||
                                 o.customerEmail.toLowerCase().includes(q) ||
+                                (o.billingAddress || '').toLowerCase().includes(q) ||
                                 (o.customReference || '').toLowerCase().includes(q);
-                              return matchesStatus && matchesQuery;
+                              return matchesStatus && matchesType && matchesQuery;
                             })
                             .map((ord: any) => {
                               const linkedSession = sessionsList.find(
                                 (s: any) => s.orderId === ord.id
                               );
+                              const parsedBill = (() => {
+                                try {
+                                  return JSON.parse(ord.billingAddress || '{}');
+                                } catch {
+                                  return {};
+                                }
+                              })();
                               return (
                                 <tr key={ord.id} className="hover:bg-slate-800/30">
                                   <td className="py-3 px-4">
@@ -2047,9 +2090,13 @@ export default function App() {
                                       <span className="font-mono font-semibold text-white">
                                         {ord.orderNumber}
                                       </span>
-                                      {ord.isPrivateLinkOrder && (
+                                      {ord.isPrivateLinkOrder ? (
                                         <span className="px-1.5 py-0.5 text-[10px] font-mono bg-amber-950/80 text-amber-300 border border-amber-500/40 rounded">
-                                          /pay/token
+                                          Private (/pay/token)
+                                        </span>
+                                      ) : (
+                                        <span className="px-1.5 py-0.5 text-[10px] font-mono bg-emerald-950/60 text-emerald-300 border border-emerald-500/30 rounded">
+                                          Public Storefront
                                         </span>
                                       )}
                                     </div>
@@ -2061,10 +2108,22 @@ export default function App() {
                                   <td className="py-3 px-4">
                                     <div className="font-medium text-slate-200">
                                       {ord.customerName}
+                                      {parsedBill.companyName && (
+                                        <span className="text-slate-400 font-normal">
+                                          {' '}
+                                          · {parsedBill.companyName}
+                                        </span>
+                                      )}
                                     </div>
                                     <div className="text-[11px] text-slate-400">
-                                      {ord.customerEmail}
+                                      {ord.customerEmail} ·{' '}
+                                      <span className="font-mono">{ord.customerMobile}</span>
                                     </div>
+                                    {parsedBill.gstin && (
+                                      <div className="text-[11px] font-mono text-emerald-400 mt-0.5">
+                                        GSTIN: {parsedBill.gstin}
+                                      </div>
+                                    )}
                                   </td>
                                   <td className="py-3 px-4">
                                     <select
@@ -2131,7 +2190,13 @@ export default function App() {
                                     {formatINR(ord.totalAmountPaise)}
                                   </td>
                                   <td className="py-3 px-4 text-right">
-                                    <div className="flex items-center justify-end gap-2">
+                                    <div className="flex items-center justify-end gap-1.5">
+                                      <button
+                                        onClick={() => setEditingOrder(ord)}
+                                        className="px-2.5 py-1 text-[11px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded hover:bg-amber-500/30 whitespace-nowrap"
+                                      >
+                                        Edit Order
+                                      </button>
                                       {linkedSession && (
                                         <button
                                           onClick={() =>
@@ -2500,6 +2565,13 @@ export default function App() {
                                 onClick={(e) => e.stopPropagation()}
                               >
                                 <div className="flex items-center justify-end gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingProduct(p)}
+                                    className="px-2.5 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg whitespace-nowrap"
+                                  >
+                                    Edit
+                                  </button>
                                   <button
                                     type="button"
                                     disabled={activatingProductId === p.id}
@@ -2959,7 +3031,7 @@ export default function App() {
                             )}
 
                             {isPayU && (
-                              <div className="bg-slate-950 border border-emerald-500/30 rounded-lg p-3.5 space-y-2 text-xs">
+                              <div className="bg-slate-950 border border-emerald-500/30 rounded-lg p-3.5 space-y-2.5 text-xs">
                                 <div className="flex items-center justify-between">
                                   <span className="font-semibold text-emerald-300">
                                     PayU India Hosted Checkout (SHA-512 Hash Parameter Guide)
@@ -2988,13 +3060,51 @@ export default function App() {
                                     </div>
                                   </div>
                                 </div>
+
+                                <div className="bg-slate-900/90 border border-slate-800 rounded p-2.5 space-y-1.5 text-[11px]">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-slate-400">PayU Webhook URL:</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const url = `${window.location.origin}/api/v1/webhooks/payu`;
+                                        navigator.clipboard.writeText(url);
+                                        showToast(`Copied PayU Webhook URL: ${url}`);
+                                      }}
+                                      className="font-mono text-emerald-400 hover:underline truncate"
+                                    >
+                                      {typeof window !== 'undefined'
+                                        ? `${window.location.origin}/api/v1/webhooks/payu`
+                                        : 'https://checkout.xperiserv.in/api/v1/webhooks/payu'}{' '}
+                                      (Copy)
+                                    </button>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-slate-400">Callback URL (surl / furl):</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const url = `${window.location.origin}/api/v1/callbacks/payu`;
+                                        navigator.clipboard.writeText(url);
+                                        showToast(`Copied PayU Callback URL: ${url}`);
+                                      }}
+                                      className="font-mono text-emerald-400 hover:underline truncate"
+                                    >
+                                      {typeof window !== 'undefined'
+                                        ? `${window.location.origin}/api/v1/callbacks/payu`
+                                        : 'https://checkout.xperiserv.in/api/v1/callbacks/payu'}{' '}
+                                      (Copy)
+                                    </button>
+                                  </div>
+                                </div>
+
                                 <div className="text-[11px] text-slate-400 leading-relaxed">
                                   Paste your exact <strong className="text-slate-200">PayU Merchant Key</strong> and{' '}
                                   <strong className="text-slate-200">PayU Merchant Salt</strong> from{' '}
                                   <span className="font-mono text-emerald-400">
                                     PayU Dashboard → Developer → API Keys
                                   </span>
-                                  . Click <strong className="text-emerald-300">Show</strong> next to Salt to inspect the exact saved string.
+                                  . You can leave <strong className="text-slate-200">PayU Webhook Secret</strong> blank (or enter your Merchant Salt), as PayU signs callbacks using your Merchant Salt.
                                 </div>
                               </div>
                             )}
@@ -4590,6 +4700,12 @@ export default function App() {
                                     </td>
                                     <td className="py-3.5 px-4 text-right space-y-1.5">
                                       <div className="flex items-center justify-end gap-1.5">
+                                        <button
+                                          onClick={() => setEditingProduct(prod)}
+                                          className="px-2.5 py-1 text-[11px] font-medium bg-slate-800 text-slate-200 rounded hover:bg-slate-700 whitespace-nowrap"
+                                        >
+                                          Edit
+                                        </button>
                                         {activeLink && (
                                           <button
                                             onClick={() =>
@@ -4623,6 +4739,89 @@ export default function App() {
                                   </tr>
                                 );
                               })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      {/* Private Link Orders Quick-Edit Table */}
+                      <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+                        <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+                          <h3 className="text-sm font-bold text-white">
+                            Private Link Orders ({ordersList.filter((o: any) => o.isPrivateLinkOrder).length})
+                          </h3>
+                          <span className="text-[11px] font-mono text-amber-400">
+                            Editable Private Purchase Link Orders
+                          </span>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left text-xs">
+                            <thead>
+                              <tr className="border-b border-slate-800 bg-slate-950/50 text-slate-400">
+                                <th className="py-2.5 px-4">Order #</th>
+                                <th className="py-2.5 px-4">Customer &amp; GSTIN</th>
+                                <th className="py-2.5 px-4">Status</th>
+                                <th className="py-2.5 px-4 text-right">Amount</th>
+                                <th className="py-2.5 px-4 text-right">Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-800/70">
+                              {ordersList.filter((o: any) => o.isPrivateLinkOrder).length === 0 ? (
+                                <tr>
+                                  <td colSpan={5} className="py-6 text-center text-slate-500">
+                                    No private purchase link orders yet.
+                                  </td>
+                                </tr>
+                              ) : (
+                                ordersList
+                                  .filter((o: any) => o.isPrivateLinkOrder)
+                                  .map((ord: any) => {
+                                    const pBill = (() => {
+                                      try {
+                                        return JSON.parse(ord.billingAddress || '{}');
+                                      } catch {
+                                        return {};
+                                      }
+                                    })();
+                                    return (
+                                      <tr key={ord.id} className="hover:bg-slate-800/30">
+                                        <td className="py-2.5 px-4 font-mono font-semibold text-white">
+                                          {ord.orderNumber}
+                                        </td>
+                                        <td className="py-2.5 px-4">
+                                          <div className="text-slate-200">{ord.customerName}</div>
+                                          {pBill.gstin && (
+                                            <div className="text-[10px] font-mono text-emerald-400">
+                                              GSTIN: {pBill.gstin}
+                                            </div>
+                                          )}
+                                        </td>
+                                        <td className="py-2.5 px-4 font-mono text-slate-300">
+                                          {ord.orderStatus} · {ord.paymentStatus}
+                                        </td>
+                                        <td className="py-2.5 px-4 text-right font-mono text-white">
+                                          {formatINR(ord.totalAmountPaise)}
+                                        </td>
+                                        <td className="py-2.5 px-4 text-right">
+                                          <div className="flex items-center justify-end gap-1.5">
+                                            <button
+                                              onClick={() => setEditingOrder(ord)}
+                                              className="px-2.5 py-1 text-[11px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded hover:bg-amber-500/30"
+                                            >
+                                              Edit Order
+                                            </button>
+                                            <button
+                                              onClick={() => setInvoicePreviewOrder(ord)}
+                                              className="px-2.5 py-1 text-[11px] font-medium bg-slate-800 text-slate-200 rounded hover:bg-slate-700"
+                                            >
+                                              Invoice
+                                            </button>
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    );
+                                  })
+                              )}
                             </tbody>
                           </table>
                         </div>
@@ -5307,6 +5506,31 @@ export default function App() {
         <InvoicePreviewModal
           order={invoicePreviewOrder}
           onClose={() => setInvoicePreviewOrder(null)}
+        />
+      )}
+
+      {editingOrder && (
+        <EditOrderModal
+          order={editingOrder}
+          products={productsList}
+          authToken={authToken}
+          onClose={() => setEditingOrder(null)}
+          onSaved={async () => {
+            await fetchPlatformData();
+            showToast('Order information updated and synced');
+          }}
+        />
+      )}
+
+      {editingProduct && (
+        <EditProductModal
+          product={editingProduct}
+          authToken={authToken}
+          onClose={() => setEditingProduct(null)}
+          onSaved={async () => {
+            await fetchPlatformData();
+            showToast('Product details updated');
+          }}
         />
       )}
     </div>

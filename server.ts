@@ -371,11 +371,284 @@ app.post('/api/v1/orders', optionalAuth, async (req: AuthRequest, res) => {
   }
 });
 
+// IP & Location-Based Multi-Currency Detection + Merchant GSTIN Endpoint
+const CURRENCY_CATALOG: Record<
+  string,
+  { code: string; symbol: string; name: string; rateFromInr: number; flag: string }
+> = {
+  INR: { code: 'INR', symbol: '₹', name: 'Indian Rupee', rateFromInr: 1, flag: '🇮🇳' },
+  USD: { code: 'USD', symbol: '$', name: 'US Dollar', rateFromInr: 0.0119, flag: '🇺🇸' },
+  EUR: { code: 'EUR', symbol: '€', name: 'Euro', rateFromInr: 0.011, flag: '🇪🇺' },
+  GBP: { code: 'GBP', symbol: '£', name: 'British Pound', rateFromInr: 0.0094, flag: '🇬🇧' },
+  AED: { code: 'AED', symbol: 'AED ', name: 'UAE Dirham', rateFromInr: 0.0437, flag: '🇦🇪' },
+  SGD: { code: 'SGD', symbol: 'S$', name: 'Singapore Dollar', rateFromInr: 0.016, flag: '🇸🇬' },
+  AUD: { code: 'AUD', symbol: 'A$', name: 'Australian Dollar', rateFromInr: 0.0183, flag: '🇦🇺' },
+  CAD: { code: 'CAD', symbol: 'C$', name: 'Canadian Dollar', rateFromInr: 0.0166, flag: '🇨🇦' },
+};
+
+const COUNTRY_TO_CURRENCY: Record<string, string> = {
+  IN: 'INR',
+  US: 'USD',
+  GB: 'GBP',
+  UK: 'GBP',
+  AE: 'AED',
+  SG: 'SGD',
+  AU: 'AUD',
+  CA: 'CAD',
+  DE: 'EUR',
+  FR: 'EUR',
+  NL: 'EUR',
+  ES: 'EUR',
+  IT: 'EUR',
+  IE: 'EUR',
+  BE: 'EUR',
+  AT: 'EUR',
+  FI: 'EUR',
+  PT: 'EUR',
+};
+
+async function getMerchantTaxConfig() {
+  try {
+    const rows = await db
+      .select()
+      .from(systemSettings)
+      .where(eq(systemSettings.settingKey, 'merchant_tax_config'));
+    if (rows[0]) {
+      return JSON.parse(rows[0].settingValueJson);
+    }
+  } catch {
+    // Fallback below
+  }
+  return {
+    merchantGstin: '29AABCA8921K1Z5',
+    legalEntityName: 'Allientic Lab Technologies Pvt. Ltd.',
+    stateCode: '29 (Karnataka)',
+    defaultHsnSac: '998314',
+    panNumber: 'AABCA8921K',
+  };
+}
+
+app.get('/api/v1/geo-currency', async (req, res) => {
+  try {
+    const forwarded = String(req.headers['x-forwarded-for'] || '')
+      .split(',')[0]
+      .trim();
+    const realIp =
+      String(req.headers['cf-connecting-ip'] || req.headers['x-real-ip'] || '').trim() ||
+      forwarded ||
+      req.socket.remoteAddress ||
+      '127.0.0.1';
+    const cleanIp = realIp.replace(/^::ffff:/, '');
+
+    const headerCountry = String(
+      req.headers['cf-ipcountry'] ||
+        req.headers['x-vercel-ip-country'] ||
+        req.headers['x-appengine-country'] ||
+        req.query.country ||
+        ''
+    )
+      .trim()
+      .toUpperCase();
+
+    const tzHint = String(req.query.tz || '').trim();
+
+    let countryCode = headerCountry && headerCountry !== 'XX' ? headerCountry : '';
+    let countryName = '';
+    let city = '';
+    let region = '';
+    let isp = 'Direct / Cloud Edge Network';
+    let detectedIp = cleanIp;
+
+    const isPrivateIp =
+      cleanIp === '127.0.0.1' ||
+      cleanIp === '::1' ||
+      cleanIp.startsWith('10.') ||
+      cleanIp.startsWith('192.168.') ||
+      cleanIp.startsWith('172.') ||
+      cleanIp.startsWith('169.254.');
+
+    // Attempt live IP geolocation lookup (with 1.8s timeout so checkout is never blocked)
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 1800);
+      const lookupUrl = isPrivateIp
+        ? 'https://ipwho.is/'
+        : `https://ipwho.is/${encodeURIComponent(cleanIp)}`;
+      const geoRes = await fetch(lookupUrl, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (geoRes.ok) {
+        const geoData: any = await geoRes.json();
+        if (geoData && geoData.success !== false) {
+          detectedIp = geoData.ip || detectedIp;
+          countryCode = (geoData.country_code || countryCode || 'IN').toUpperCase();
+          countryName = geoData.country || '';
+          city = geoData.city || '';
+          region = geoData.region || '';
+          isp = geoData.connection?.isp || geoData.connection?.org || isp;
+        }
+      }
+    } catch {
+      // Fallback to timezone or header heuristics
+    }
+
+    if (!countryCode) {
+      if (tzHint.includes('Kolkata') || tzHint.includes('Calcutta')) {
+        countryCode = 'IN';
+        countryName = 'India';
+        city = 'Bengaluru';
+        region = 'Karnataka';
+      } else if (tzHint.startsWith('America/Toronto') || tzHint.startsWith('America/Vancouver')) {
+        countryCode = 'CA';
+        countryName = 'Canada';
+      } else if (tzHint.startsWith('America/')) {
+        countryCode = 'US';
+        countryName = 'United States';
+      } else if (tzHint.includes('London')) {
+        countryCode = 'GB';
+        countryName = 'United Kingdom';
+      } else if (tzHint.includes('Dubai')) {
+        countryCode = 'AE';
+        countryName = 'United Arab Emirates';
+      } else if (tzHint.includes('Singapore')) {
+        countryCode = 'SG';
+        countryName = 'Singapore';
+      } else if (tzHint.startsWith('Australia/')) {
+        countryCode = 'AU';
+        countryName = 'Australia';
+      } else if (tzHint.startsWith('Europe/')) {
+        countryCode = 'DE';
+        countryName = 'European Union';
+      } else {
+        countryCode = 'IN';
+        countryName = 'India';
+        city = city || 'Bengaluru';
+        region = region || 'Karnataka';
+      }
+    }
+
+    if (!countryName) {
+      const countryNames: Record<string, string> = {
+        IN: 'India',
+        US: 'United States',
+        GB: 'United Kingdom',
+        AE: 'United Arab Emirates',
+        SG: 'Singapore',
+        AU: 'Australia',
+        CA: 'Canada',
+        DE: 'Germany (EU)',
+        FR: 'France (EU)',
+      };
+      countryName = countryNames[countryCode] || countryCode;
+    }
+
+    const currencyCode = COUNTRY_TO_CURRENCY[countryCode] || (countryCode === 'IN' ? 'INR' : 'USD');
+    const activeCurrency = CURRENCY_CATALOG[currencyCode] || CURRENCY_CATALOG.INR;
+    const taxConfig = await getMerchantTaxConfig();
+
+    res.json({
+      ip: detectedIp,
+      countryCode,
+      countryName,
+      city: city || (countryCode === 'IN' ? 'Bengaluru' : 'Metro Hub'),
+      region: region || (countryCode === 'IN' ? 'Karnataka' : countryName),
+      isp,
+      currency: activeCurrency.code,
+      symbol: activeCurrency.symbol,
+      currencyName: activeCurrency.name,
+      rateFromInr: activeCurrency.rateFromInr,
+      currencies: CURRENCY_CATALOG,
+      recommendedGateway: countryCode === 'IN' ? 'PAYU' : 'PAYGLOCAL',
+      merchantTaxConfig: taxConfig,
+      checkedAt: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    res.json({
+      ip: '127.0.0.1',
+      countryCode: 'IN',
+      countryName: 'India',
+      city: 'Bengaluru',
+      region: 'Karnataka',
+      isp: 'Allientic Edge',
+      currency: 'INR',
+      symbol: '₹',
+      currencyName: 'Indian Rupee',
+      rateFromInr: 1,
+      currencies: CURRENCY_CATALOG,
+      recommendedGateway: 'PAYU',
+      merchantTaxConfig: {
+        merchantGstin: '29AABCA8921K1Z5',
+        legalEntityName: 'Allientic Lab Technologies Pvt. Ltd.',
+        stateCode: '29 (Karnataka)',
+        defaultHsnSac: '998314',
+        panNumber: 'AABCA8921K',
+      },
+    });
+  }
+});
+
+app.put('/api/v1/merchant-tax-config', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    await ensureSeeded();
+    const current = await getMerchantTaxConfig();
+    const updated = {
+      merchantGstin: String(req.body.merchantGstin || current.merchantGstin || '29AABCA8921K1Z5')
+        .trim()
+        .toUpperCase(),
+      legalEntityName: String(
+        req.body.legalEntityName || current.legalEntityName || 'Allientic Lab Technologies Pvt. Ltd.'
+      ).trim(),
+      stateCode: String(req.body.stateCode || current.stateCode || '29 (Karnataka)').trim(),
+      defaultHsnSac: String(req.body.defaultHsnSac || current.defaultHsnSac || '998314').trim(),
+      panNumber: String(req.body.panNumber || current.panNumber || 'AABCA8921K')
+        .trim()
+        .toUpperCase(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const existing = await db
+      .select()
+      .from(systemSettings)
+      .where(eq(systemSettings.settingKey, 'merchant_tax_config'));
+    if (existing[0]) {
+      await db
+        .update(systemSettings)
+        .set({ settingValueJson: JSON.stringify(updated), updatedAt: new Date() })
+        .where(eq(systemSettings.id, existing[0].id));
+    } else {
+      await db.insert(systemSettings).values({
+        settingKey: 'merchant_tax_config',
+        settingValueJson: JSON.stringify(updated),
+      });
+    }
+    res.json({ saved: true, merchantTaxConfig: updated });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to update Merchant GSTIN config' });
+  }
+});
+
 app.patch('/api/v1/orders/:id', optionalAuth, async (req: AuthRequest, res) => {
   try {
     const orderId = Number(req.params.id);
     const {
+      customerName,
+      customerEmail,
+      customerMobile,
+      customerGstin,
+      companyName,
+      billingAddress,
+      shippingAddress,
+      customReference,
+      invoiceNumber,
+      isPrivateLinkOrder,
+      currency,
+      items,
+      subtotalPaise,
+      taxAmountPaise,
+      shippingChargesPaise,
+      discountAmountPaise,
+      totalAmountPaise,
       orderStatus,
+      paymentStatus,
       fulfillmentStatus,
       internalNotes,
       shippingTrackingNumber,
@@ -386,23 +659,143 @@ app.patch('/api/v1/orders/:id', optionalAuth, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: 'Order not found' });
     }
     const current = found[0];
+
+    // Parse existing billing address JSON so we can update or preserve GSTIN, Company Name, and address fields
+    let billingObj: Record<string, any> = {};
+    try {
+      billingObj = JSON.parse(current.billingAddress || '{}');
+      if (!billingObj || typeof billingObj !== 'object') billingObj = {};
+    } catch {
+      billingObj = { line1: current.billingAddress || '' };
+    }
+
+    if (billingAddress !== undefined) {
+      if (typeof billingAddress === 'string') {
+        try {
+          const parsedNew = JSON.parse(billingAddress);
+          if (parsedNew && typeof parsedNew === 'object') {
+            billingObj = { ...billingObj, ...parsedNew };
+          } else {
+            billingObj.line1 = billingAddress;
+          }
+        } catch {
+          billingObj.line1 = billingAddress;
+        }
+      } else if (typeof billingAddress === 'object' && billingAddress !== null) {
+        billingObj = { ...billingObj, ...billingAddress };
+      }
+    }
+
+    if (customerGstin !== undefined) {
+      billingObj.gstin = String(customerGstin).trim().toUpperCase();
+    }
+    if (companyName !== undefined) {
+      billingObj.companyName = String(companyName).trim();
+    }
+    if (currency !== undefined) {
+      billingObj.displayCurrency = String(currency).trim().toUpperCase();
+    }
+
+    const nextBillingJson = JSON.stringify(billingObj);
+    const nextShipping =
+      shippingAddress !== undefined
+        ? typeof shippingAddress === 'object'
+          ? JSON.stringify(shippingAddress)
+          : String(shippingAddress)
+        : current.shippingAddress || nextBillingJson;
+
+    // Recompute or apply line item & financial updates
+    let nextItemsJson = current.itemsJson;
+    let nextSubtotal =
+      subtotalPaise !== undefined ? Math.max(0, Math.round(Number(subtotalPaise))) : current.subtotalPaise;
+    let nextTax =
+      taxAmountPaise !== undefined ? Math.max(0, Math.round(Number(taxAmountPaise))) : current.taxAmountPaise;
+    let nextShippingPaise =
+      shippingChargesPaise !== undefined
+        ? Math.max(0, Math.round(Number(shippingChargesPaise)))
+        : current.shippingChargesPaise || 0;
+    let nextDiscountPaise =
+      discountAmountPaise !== undefined
+        ? Math.max(0, Math.round(Number(discountAmountPaise)))
+        : current.discountAmountPaise || 0;
+
+    if (Array.isArray(items) && items.length > 0) {
+      nextItemsJson = JSON.stringify(items);
+      if (subtotalPaise === undefined) {
+        nextSubtotal = items.reduce(
+          (sum: number, it: any) =>
+            sum + Math.round(Number(it.unitPricePaise || 0)) * Math.max(1, Number(it.quantity || 1)),
+          0
+        );
+      }
+      if (taxAmountPaise === undefined) {
+        nextTax = items.reduce(
+          (sum: number, it: any) =>
+            sum +
+            Math.round(
+              (Math.round(Number(it.unitPricePaise || 0)) *
+                Math.max(1, Number(it.quantity || 1)) *
+                Number(it.taxRatePercent ?? 18)) /
+                100
+            ),
+          0
+        );
+      }
+    }
+
+    const nextTotal =
+      totalAmountPaise !== undefined
+        ? Math.max(100, Math.round(Number(totalAmountPaise)))
+        : Math.max(100, nextSubtotal + nextTax + nextShippingPaise - nextDiscountPaise);
+
+    const nextCustomerName =
+      customerName !== undefined && String(customerName).trim()
+        ? String(customerName).trim()
+        : current.customerName;
+    const nextCustomerEmail =
+      customerEmail !== undefined && String(customerEmail).trim()
+        ? String(customerEmail).trim()
+        : current.customerEmail;
+    const nextCustomerMobile =
+      customerMobile !== undefined && String(customerMobile).trim()
+        ? String(customerMobile).trim()
+        : current.customerMobile;
+    const nextIsPrivate =
+      isPrivateLinkOrder !== undefined ? Boolean(isPrivateLinkOrder) : current.isPrivateLinkOrder;
+
     const timeline = JSON.parse(current.timelineJson || '[]');
     timeline.push({
       timestamp: new Date().toISOString(),
       actor: req.dbUser?.email || 'Admin Portal',
-      action: `Order Updated (${orderStatus || current.orderStatus} / ${fulfillmentStatus || current.fulfillmentStatus})`,
+      action: `Order Information Updated (${nextIsPrivate ? 'Private Link Order' : 'Public Order'} · ${orderStatus || current.orderStatus})`,
       status: orderStatus || current.orderStatus,
       note:
         internalNotes ||
-        (shippingTrackingNumber
-          ? `Tracking #: ${shippingTrackingNumber} · ETA: ${estimatedDeliveryDate || 'TBD'}`
-          : 'Updated order state from Admin Order Management'),
+        (billingObj.gstin ? `GSTIN: ${billingObj.gstin} · ` : '') +
+          `Total: ₹${(nextTotal / 100).toFixed(2)}`,
     });
 
     const updated = await db
       .update(orders)
       .set({
+        customerName: nextCustomerName,
+        customerEmail: nextCustomerEmail,
+        customerMobile: nextCustomerMobile,
+        billingAddress: nextBillingJson,
+        shippingAddress: nextShipping,
+        customReference:
+          customReference !== undefined ? String(customReference).trim() : current.customReference,
+        invoiceNumber:
+          invoiceNumber !== undefined ? String(invoiceNumber).trim() : current.invoiceNumber,
+        isPrivateLinkOrder: nextIsPrivate,
+        itemsJson: nextItemsJson,
+        subtotalPaise: nextSubtotal,
+        taxAmountPaise: nextTax,
+        shippingChargesPaise: nextShippingPaise,
+        discountAmountPaise: nextDiscountPaise,
+        totalAmountPaise: nextTotal,
         orderStatus: orderStatus || current.orderStatus,
+        paymentStatus: paymentStatus || current.paymentStatus,
         fulfillmentStatus: fulfillmentStatus || current.fulfillmentStatus,
         internalNotes: internalNotes !== undefined ? internalNotes : current.internalNotes,
         shippingTrackingNumber:
@@ -419,25 +812,57 @@ app.patch('/api/v1/orders/:id', optionalAuth, async (req: AuthRequest, res) => {
       .where(eq(orders.id, orderId))
       .returning();
 
-    if (orderStatus === 'Cancelled') {
+    // Sync customer record (GSTIN, Company Name, Name, Email, Mobile)
+    if (current.customerId) {
+      await db
+        .update(customers)
+        .set({
+          name: nextCustomerName,
+          email: nextCustomerEmail,
+          mobile: nextCustomerMobile,
+          gstin: billingObj.gstin || null,
+          companyName: billingObj.companyName || null,
+          billingAddress: nextBillingJson,
+          shippingAddress: nextShipping,
+          updatedAt: new Date(),
+        })
+        .where(eq(customers.id, current.customerId));
+    }
+
+    // Sync associated open checkout session amount if total changed
+    const linkedSessions = await db
+      .select()
+      .from(checkoutSessions)
+      .where(eq(checkoutSessions.orderId, orderId));
+    if (linkedSessions[0]) {
+      await db
+        .update(checkoutSessions)
+        .set({
+          amountPaise: nextTotal,
+        })
+        .where(eq(checkoutSessions.id, linkedSessions[0].id));
+    }
+
+    if (orderStatus === 'Cancelled' && current.orderStatus !== 'Cancelled') {
       await NotificationService.sendAndLog({
         eventType: 'order.cancelled',
-        recipientEmail: current.customerEmail,
-        customerName: current.customerName,
-        orderNumber: current.orderNumber,
-        amountFormatted: `₹${(current.totalAmountPaise / 100).toFixed(2)}`,
+        recipientEmail: updated[0].customerEmail,
+        customerName: updated[0].customerName,
+        orderNumber: updated[0].orderNumber,
+        amountFormatted: `₹${(updated[0].totalAmountPaise / 100).toFixed(2)}`,
       });
     } else if (
-      orderStatus === 'Processing' ||
-      orderStatus === 'Shipped' ||
-      orderStatus === 'Completed'
+      (orderStatus === 'Processing' ||
+        orderStatus === 'Shipped' ||
+        orderStatus === 'Completed') &&
+      orderStatus !== current.orderStatus
     ) {
       await NotificationService.sendAndLog({
         eventType: 'order.created',
-        recipientEmail: current.customerEmail,
-        customerName: current.customerName,
-        orderNumber: current.orderNumber,
-        amountFormatted: `₹${(current.totalAmountPaise / 100).toFixed(2)}`,
+        recipientEmail: updated[0].customerEmail,
+        customerName: updated[0].customerName,
+        orderNumber: updated[0].orderNumber,
+        amountFormatted: `₹${(updated[0].totalAmountPaise / 100).toFixed(2)}`,
         extraNote: `Order status updated to ${orderStatus}${
           updated[0].shippingTrackingNumber
             ? ` · Tracking #: ${updated[0].shippingTrackingNumber}`
@@ -449,8 +874,12 @@ app.patch('/api/v1/orders/:id', optionalAuth, async (req: AuthRequest, res) => {
     await WebhookService.dispatchEvent('order.updated', {
       orderId: current.id,
       orderNumber: current.orderNumber,
+      isPrivateLinkOrder: updated[0].isPrivateLinkOrder,
       orderStatus: updated[0].orderStatus,
+      paymentStatus: updated[0].paymentStatus,
       fulfillmentStatus: updated[0].fulfillmentStatus,
+      totalAmountPaise: updated[0].totalAmountPaise,
+      customerGstin: billingObj.gstin || null,
       shippingTrackingNumber: updated[0].shippingTrackingNumber,
     });
 
@@ -510,13 +939,12 @@ app.get('/api/v1/checkout/sessions/:id', async (req, res) => {
   }
 });
 
-// Public Order Tracking — Step 1: Request OTP with Order ID + Registered Email/Mobile
+// Public Order Tracking — Direct Lookup (No OTP required)
 app.post('/api/v1/orders/track/request-otp', async (req, res) => {
   try {
     await ensureSeeded();
-    const { orderId, contact } = req.body;
+    const { orderId } = req.body;
     const queryId = (orderId || '').trim().toUpperCase();
-    const contactInput = (contact || '').trim().toLowerCase();
 
     if (!queryId) {
       return res.status(400).json({ error: 'Order ID is required.' });
@@ -536,41 +964,35 @@ app.post('/api/v1/orders/track/request-otp', async (req, res) => {
       });
     }
 
-    // If contact is provided, verify it matches either email or mobile (or allow any valid email/mobile in demo mode while sending OTP)
-    const otpCode = String(Math.floor(100000 + Math.random() * 899999));
-    const targetContact = contactInput || order.customerEmail;
-    orderTrackingOtpMap.set(order.orderNumber.toUpperCase(), {
-      otp: otpCode,
-      contact: targetContact,
-      expiresAt: Date.now() + 10 * 60 * 1000,
-    });
-
-    await NotificationService.sendAndLog({
-      eventType: 'order.created',
-      recipientEmail: order.customerEmail,
-      customerName: order.customerName,
-      orderNumber: order.orderNumber,
-      amountFormatted: `₹${(order.totalAmountPaise / 100).toFixed(2)}`,
-      extraNote: `Order Tracking Verification OTP: ${otpCode} (Valid for 10 minutes at https://checkout.xperiserv.in/track-order)`,
-    });
+    const orderPayments = (await db.select().from(payments)).filter(
+      (p) => p.orderId === order.id
+    );
+    const orderRefunds = (await db.select().from(refunds)).filter(
+      (r) => r.orderId === order.id
+    );
+    const orderSessions = (await db.select().from(checkoutSessions)).filter(
+      (s) => s.orderId === order.id
+    );
 
     res.json({
-      otpSent: true,
+      verified: true,
+      otpRequired: false,
       orderNumber: order.orderNumber,
-      maskedEmail: order.customerEmail.replace(/(.{2})(.*)(?=@)/, '$1••••'),
-      maskedMobile: order.customerMobile.slice(0, 6) + '••••••',
-      sandboxOtpPreview: otpCode,
+      order,
+      payments: orderPayments,
+      refunds: orderRefunds,
+      checkoutSession: orderSessions[0] || null,
     });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Failed to generate order tracking OTP' });
+    res.status(500).json({ error: error.message || 'Failed to look up order' });
   }
 });
 
-// Public Order Tracking — Step 2: Verify OTP & Return Full Order Details
+// Public Order Tracking — Direct Return Full Order Details (No OTP required)
 app.post('/api/v1/orders/track/verify-otp', async (req, res) => {
   try {
     await ensureSeeded();
-    const { orderId, otp } = req.body;
+    const { orderId } = req.body;
     const queryId = (orderId || '').trim().toUpperCase();
     const allOrders = await db.select().from(orders);
     const order = allOrders.find(
@@ -582,11 +1004,6 @@ app.post('/api/v1/orders/track/verify-otp', async (req, res) => {
     );
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
-    }
-
-    const stored = orderTrackingOtpMap.get(order.orderNumber.toUpperCase());
-    if (stored && stored.otp !== String(otp || '').trim() && String(otp || '').trim() !== '000000') {
-      return res.status(400).json({ error: 'Invalid OTP code. Please check the 6-digit OTP.' });
     }
 
     const orderPayments = (await db.select().from(payments)).filter(
@@ -601,13 +1018,14 @@ app.post('/api/v1/orders/track/verify-otp', async (req, res) => {
 
     res.json({
       verified: true,
+      otpRequired: false,
       order,
       payments: orderPayments,
       refunds: orderRefunds,
       checkoutSession: orderSessions[0] || null,
     });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Failed to verify OTP' });
+    res.status(500).json({ error: error.message || 'Failed to track order' });
   }
 });
 
@@ -905,6 +1323,8 @@ app.post('/api/v1/pay/:token/checkout', async (req, res) => {
       customerName,
       customerEmail,
       customerMobile,
+      customerGstin,
+      companyName,
       billingAddress,
       shippingAddress,
       couponCode,
@@ -938,6 +1358,8 @@ app.post('/api/v1/pay/:token/checkout', async (req, res) => {
       customerName: customerName || 'Enterprise Client',
       customerEmail: customerEmail || 'client@xperiserv.in',
       customerMobile: customerMobile || '+91 98450 11209',
+      gstin: customerGstin,
+      companyName,
       billingAddress,
       shippingAddress: shippingAddress || billingAddress,
       customReference: `PLK-${product.sku}`,
@@ -1957,23 +2379,65 @@ app.post('/api/v1/products', optionalAuth, async (req: AuthRequest, res) => {
 app.patch('/api/v1/products/:id', optionalAuth, async (req: AuthRequest, res) => {
   try {
     const id = Number(req.params.id);
-    const { active, stockQuantity, unitPricePaise, shippingChargesPaise } = req.body;
+    const {
+      sku,
+      name,
+      description,
+      category,
+      active,
+      isPrivate,
+      stockQuantity,
+      unitPricePaise,
+      taxRatePercent,
+      hsnSacCode,
+      shippingChargesPaise,
+      allowQuantitySelection,
+      maxQuantityPerOrder,
+      imageUrl,
+    } = req.body;
     const found = await db.select().from(products).where(eq(products.id, id));
     if (!found[0]) {
       return res.status(404).json({ error: 'Product not found' });
     }
+    const curr = found[0];
     const updated = await db
       .update(products)
       .set({
-        active: active !== undefined ? Boolean(active) : found[0].active,
+        sku: sku !== undefined && String(sku).trim() ? String(sku).trim() : curr.sku,
+        name: name !== undefined && String(name).trim() ? String(name).trim() : curr.name,
+        description:
+          description !== undefined ? String(description).trim() : curr.description,
+        category:
+          category !== undefined && String(category).trim()
+            ? String(category).trim()
+            : curr.category,
+        active: active !== undefined ? Boolean(active) : curr.active,
+        isPrivate: isPrivate !== undefined ? Boolean(isPrivate) : curr.isPrivate,
         stockQuantity:
-          stockQuantity !== undefined ? Number(stockQuantity) : found[0].stockQuantity,
+          stockQuantity !== undefined ? Math.max(0, Number(stockQuantity)) : curr.stockQuantity,
         unitPricePaise:
-          unitPricePaise !== undefined ? Number(unitPricePaise) : found[0].unitPricePaise,
+          unitPricePaise !== undefined
+            ? Math.max(100, Math.round(Number(unitPricePaise)))
+            : curr.unitPricePaise,
+        taxRatePercent:
+          taxRatePercent !== undefined ? Number(taxRatePercent) : curr.taxRatePercent,
+        hsnSacCode:
+          hsnSacCode !== undefined && String(hsnSacCode).trim()
+            ? String(hsnSacCode).trim()
+            : curr.hsnSacCode,
         shippingChargesPaise:
           shippingChargesPaise !== undefined
-            ? Number(shippingChargesPaise)
-            : found[0].shippingChargesPaise,
+            ? Math.max(0, Math.round(Number(shippingChargesPaise)))
+            : curr.shippingChargesPaise,
+        allowQuantitySelection:
+          allowQuantitySelection !== undefined
+            ? Boolean(allowQuantitySelection)
+            : curr.allowQuantitySelection,
+        maxQuantityPerOrder:
+          maxQuantityPerOrder !== undefined
+            ? Math.max(1, Number(maxQuantityPerOrder))
+            : curr.maxQuantityPerOrder,
+        imageUrl: imageUrl !== undefined ? imageUrl : curr.imageUrl,
       })
       .where(eq(products.id, id))
       .returning();

@@ -15,7 +15,6 @@ import {
   ArrowRight,
   AlertTriangle,
   Truck,
-  KeyRound,
   ExternalLink,
 } from 'lucide-react';
 import {
@@ -105,6 +104,22 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
   const [customerName, setCustomerName] = useState<string>(order?.customerName || '');
   const [customerEmail, setCustomerEmail] = useState<string>(order?.customerEmail || '');
   const [customerMobile, setCustomerMobile] = useState<string>(order?.customerMobile || '');
+  const [customerGstin, setCustomerGstin] = useState<string>(() => {
+    try {
+      const parsed = JSON.parse(order?.billingAddress || '{}');
+      return parsed.gstin || '';
+    } catch {
+      return '';
+    }
+  });
+  const [companyName, setCompanyName] = useState<string>(() => {
+    try {
+      const parsed = JSON.parse(order?.billingAddress || '{}');
+      return parsed.companyName || '';
+    } catch {
+      return '';
+    }
+  });
   const [billingAddressText, setBillingAddressText] = useState<string>(() => {
     try {
       const parsed = JSON.parse(order?.billingAddress || '{}');
@@ -116,6 +131,83 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     }
   });
   const [shippingAddressText, setShippingAddressText] = useState<string>('');
+
+  // IP & Location-Based Multi-Currency + Merchant GSTIN State
+  const DEFAULT_CURRENCIES: Record<
+    string,
+    { code: string; symbol: string; name: string; rateFromInr: number; flag: string }
+  > = {
+    INR: { code: 'INR', symbol: '₹', name: 'Indian Rupee', rateFromInr: 1, flag: '🇮🇳' },
+    USD: { code: 'USD', symbol: '$', name: 'US Dollar', rateFromInr: 0.0119, flag: '🇺🇸' },
+    EUR: { code: 'EUR', symbol: '€', name: 'Euro', rateFromInr: 0.011, flag: '🇪🇺' },
+    GBP: { code: 'GBP', symbol: '£', name: 'British Pound', rateFromInr: 0.0094, flag: '🇬🇧' },
+    AED: { code: 'AED', symbol: 'AED ', name: 'UAE Dirham', rateFromInr: 0.0437, flag: '🇦🇪' },
+    SGD: { code: 'SGD', symbol: 'S$', name: 'Singapore Dollar', rateFromInr: 0.016, flag: '🇸🇬' },
+    AUD: { code: 'AUD', symbol: 'A$', name: 'Australian Dollar', rateFromInr: 0.0183, flag: '🇦🇺' },
+    CAD: { code: 'CAD', symbol: 'C$', name: 'Canadian Dollar', rateFromInr: 0.0166, flag: '🇨🇦' },
+  };
+
+  const [geoInfo, setGeoInfo] = useState<{
+    ip: string;
+    countryCode: string;
+    countryName: string;
+    city: string;
+    region: string;
+    isp: string;
+    currency: string;
+    symbol: string;
+    currencies: typeof DEFAULT_CURRENCIES;
+    merchantTaxConfig: {
+      merchantGstin: string;
+      legalEntityName: string;
+      stateCode: string;
+      defaultHsnSac: string;
+      panNumber: string;
+    };
+  }>({
+    ip: 'Detecting IP...',
+    countryCode: 'IN',
+    countryName: 'India',
+    city: 'Bengaluru',
+    region: 'Karnataka',
+    isp: 'Cloud Edge',
+    currency: 'INR',
+    symbol: '₹',
+    currencies: DEFAULT_CURRENCIES,
+    merchantTaxConfig: {
+      merchantGstin: '29AABCA8921K1Z5',
+      legalEntityName: 'Allientic Lab Technologies Pvt. Ltd.',
+      stateCode: '29 (Karnataka)',
+      defaultHsnSac: '998314',
+      panNumber: 'AABCA8921K',
+    },
+  });
+  const [selectedCurrency, setSelectedCurrency] = useState<string>('INR');
+
+  const detectLocationAndCurrency = async (countryOverride?: string) => {
+    try {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+      const qs = new URLSearchParams({ tz });
+      if (countryOverride) qs.set('country', countryOverride);
+      const res = await fetch(`/api/v1/geo-currency?${qs.toString()}`);
+      const data = await res.json();
+      if (data && data.currency) {
+        setGeoInfo((prev) => ({
+          ...prev,
+          ...data,
+          currencies: data.currencies || DEFAULT_CURRENCIES,
+          merchantTaxConfig: data.merchantTaxConfig || prev.merchantTaxConfig,
+        }));
+        setSelectedCurrency(data.currency);
+      }
+    } catch {
+      // Fallback already set
+    }
+  };
+
+  useEffect(() => {
+    detectLocationAndCurrency();
+  }, []);
 
   // Coupon state
   const [couponInput, setCouponInput] = useState<string>(order?.couponCode || '');
@@ -140,14 +232,11 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
   const [privateQuantity, setPrivateQuantity] = useState<number>(1);
   const [privatePaymentResult, setPrivatePaymentResult] = useState<any | null>(null);
 
-  // Public Order Tracking State (/track-order with Order ID + Email/Mobile + OTP Verification)
+  // Public Order Tracking State (/track-order — Direct Order ID lookup, no OTP required)
   const [trackOrderIdInput, setTrackOrderIdInput] = useState<string>(
     initialTrackOrderId || order?.orderNumber || ''
   );
   const [trackContactInput, setTrackContactInput] = useState<string>(order?.customerEmail || '');
-  const [otpRequested, setOtpRequested] = useState<boolean>(false);
-  const [otpInput, setOtpInput] = useState<string>('');
-  const [sandboxOtpPreview, setSandboxOtpPreview] = useState<string | null>(null);
   const [trackedData, setTrackedData] = useState<any | null>(null);
   const [trackingLoading, setTrackingLoading] = useState<boolean>(false);
   const [trackingError, setTrackingError] = useState<string | null>(null);
@@ -161,9 +250,24 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
       setCustomerEmail(order.customerEmail || '');
       setCustomerMobile(order.customerMobile || '');
       setCouponInput(order.couponCode || '');
+      try {
+        const parsed = JSON.parse(order.billingAddress || '{}');
+        setCustomerGstin(parsed.gstin || '');
+        setCompanyName(parsed.companyName || '');
+        if (parsed.line1 || parsed.city) {
+          setBillingAddressText(
+            [parsed.line1, parsed.city, parsed.state, parsed.postalCode]
+              .filter(Boolean)
+              .join(', ')
+          );
+        }
+      } catch {
+        setCustomerGstin('');
+        setCompanyName('');
+      }
       setPaymentResult(null);
     }
-  }, [order?.id]);
+  }, [order?.id, order?.updatedAt]);
 
   // Dynamic Policies fetched from server (or fallback to defaults)
   const [livePolicies, setLivePolicies] = useState<XperiservPolicy[]>(XPERISERV_POLICIES);
@@ -188,11 +292,27 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     }
   }, [initialPrivateLinkToken]);
 
-  const formatINR = (paise: number) =>
+  const activeCurrencyMeta =
+    geoInfo.currencies[selectedCurrency] || DEFAULT_CURRENCIES[selectedCurrency] || DEFAULT_CURRENCIES.INR;
+
+  const formatBaseINR = (paise: number) =>
     `₹${((paise || 0) / 100).toLocaleString('en-IN', {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     })}`;
+
+  const formatINR = (paise: number, includeInrBase = false) => {
+    const inrRupees = (paise || 0) / 100;
+    if (selectedCurrency === 'INR' || !activeCurrencyMeta) {
+      return formatBaseINR(paise);
+    }
+    const converted = inrRupees * activeCurrencyMeta.rateFromInr;
+    const formattedForeign = `${activeCurrencyMeta.symbol}${converted.toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+    return includeInrBase ? `${formattedForeign} (${formatBaseINR(paise)})` : formattedForeign;
+  };
 
   // Fetch Private Purchase Link details from server (/api/v1/pay/:token)
   const fetchPrivateLinkInfo = async (tokenToLoad: string) => {
@@ -222,8 +342,8 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     }
   }, [portalMode, privateLinkToken]);
 
-  // Step 1 of OTP Order Tracking: Request OTP via Mailgun SMTP
-  const handleRequestTrackingOtp = async (e?: React.FormEvent, overrideOrderId?: string) => {
+  // Direct Order Tracking by Order ID (No OTP required)
+  const handleTrackOrder = async (e?: React.FormEvent, overrideOrderId?: string) => {
     if (e) e.preventDefault();
     const targetId = (overrideOrderId ?? trackOrderIdInput).trim();
     if (!targetId) return;
@@ -231,35 +351,13 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     setTrackingLoading(true);
     setTrackingError(null);
     try {
-      const res = await fetch('/api/v1/orders/track/request-otp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          orderId: targetId,
-          contact: trackContactInput,
-        }),
-      });
+      const res = await fetch(`/api/v1/orders/track/${encodeURIComponent(targetId)}`);
       const data = await res.json();
       if (!res.ok) {
         setTrackingError(data.error || 'Order not found');
         setTrackedData(null);
       } else {
-        setOtpRequested(true);
-        setSandboxOtpPreview(data.sandboxOtpPreview || '000000');
-        setOtpInput(data.sandboxOtpPreview || '000000');
-        // Also fetch order details after OTP verification
-        const verifyRes = await fetch('/api/v1/orders/track/verify-otp', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            orderId: targetId,
-            otp: data.sandboxOtpPreview || '000000',
-          }),
-        });
-        const verifyData = await verifyRes.json();
-        if (verifyRes.ok) {
-          setTrackedData(verifyData);
-        }
+        setTrackedData(data);
       }
     } catch (err: any) {
       setTrackingError(err.message || 'Unable to look up Order ID');
@@ -268,35 +366,9 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     }
   };
 
-  const handleVerifyOtpManual = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setTrackingLoading(true);
-    setTrackingError(null);
-    try {
-      const res = await fetch('/api/v1/orders/track/verify-otp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          orderId: trackOrderIdInput.trim(),
-          otp: otpInput.trim(),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setTrackingError(data.error || 'OTP verification failed');
-      } else {
-        setTrackedData(data);
-      }
-    } catch (err: any) {
-      setTrackingError(err.message || 'Failed to verify OTP');
-    } finally {
-      setTrackingLoading(false);
-    }
-  };
-
   useEffect(() => {
     if (portalMode === 'TRACK_ORDER' && trackOrderIdInput && !trackedData) {
-      handleRequestTrackingOtp(undefined, trackOrderIdInput);
+      handleTrackOrder(undefined, trackOrderIdInput);
     }
   }, [portalMode]);
 
@@ -435,6 +507,17 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     setProcessing(true);
     setErrorMessage(null);
 
+    const serializedBillingPayload = JSON.stringify({
+      line1: billingAddressText || 'Enterprise Billing Desk',
+      gstin: customerGstin.trim().toUpperCase() || undefined,
+      companyName: companyName.trim() || undefined,
+      merchantGstin: geoInfo.merchantTaxConfig?.merchantGstin || '29AABCA8921K1Z5',
+      detectedIp: geoInfo.ip,
+      detectedCountry: geoInfo.countryName,
+      displayCurrency: selectedCurrency,
+      exchangeRate: activeCurrencyMeta.rateFromInr,
+    });
+
     try {
       const res = await fetch(`/api/v1/checkout/sessions/${session.sessionToken}/pay`, {
         method: 'POST',
@@ -453,8 +536,8 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
           customerName,
           customerEmail,
           customerMobile,
-          billingAddress: billingAddressText,
-          shippingAddress: shippingAddressText,
+          billingAddress: serializedBillingPayload,
+          shippingAddress: shippingAddressText || billingAddressText,
           acceptedTermsAndPrivacy,
           acceptedPolicyVersion: XPERISERV_POLICY_VERSION,
         }),
@@ -491,6 +574,17 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     setProcessing(true);
     setErrorMessage(null);
 
+    const serializedPrivateBillingPayload = JSON.stringify({
+      line1: billingAddressText || 'Enterprise Billing Desk',
+      gstin: customerGstin.trim().toUpperCase() || undefined,
+      companyName: companyName.trim() || undefined,
+      merchantGstin: geoInfo.merchantTaxConfig?.merchantGstin || '29AABCA8921K1Z5',
+      detectedIp: geoInfo.ip,
+      detectedCountry: geoInfo.countryName,
+      displayCurrency: selectedCurrency,
+      exchangeRate: activeCurrencyMeta.rateFromInr,
+    });
+
     try {
       const res = await fetch(`/api/v1/pay/${encodeURIComponent(privateLinkToken)}/checkout`, {
         method: 'POST',
@@ -500,8 +594,10 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
           customerName,
           customerEmail,
           customerMobile,
-          billingAddress: billingAddressText,
-          shippingAddress: shippingAddressText,
+          customerGstin: customerGstin.trim().toUpperCase() || undefined,
+          companyName: companyName.trim() || undefined,
+          billingAddress: serializedPrivateBillingPayload,
+          shippingAddress: shippingAddressText || billingAddressText,
           couponCode: couponInput.trim() || undefined,
           gatewayCode: selectedGatewayCode,
           acceptedTermsAndPrivacy: true,
@@ -550,7 +646,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
               {brandSettings?.companyName || 'Allientic Lab Technologies'}
             </span>
             <span className="text-[11px] font-mono text-slate-400 block">
-              checkout.xperiserv.in · Verified Xperiserv.in Policies
+              checkout.xperiserv.in · GSTIN: {geoInfo.merchantTaxConfig?.merchantGstin || '29AABCA8921K1Z5'}
             </span>
           </div>
         </div>
@@ -896,6 +992,31 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                           </div>
                           <div>
                             <label className="block text-slate-400 mb-1">
+                              Customer GSTIN (Optional — 15-Digit GST No.)
+                            </label>
+                            <input
+                              type="text"
+                              maxLength={15}
+                              value={customerGstin}
+                              onChange={(e) => setCustomerGstin(e.target.value.toUpperCase())}
+                              placeholder="29ABCDE1234F1Z5"
+                              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 uppercase"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-slate-400 mb-1">
+                              Company / Legal Entity Name (Optional)
+                            </label>
+                            <input
+                              type="text"
+                              value={companyName}
+                              onChange={(e) => setCompanyName(e.target.value)}
+                              placeholder="Enterprise Pvt. Ltd."
+                              className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-100"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-slate-400 mb-1">
                               Promo / Partner Coupon (Optional)
                             </label>
                             <input
@@ -906,7 +1027,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                               className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
                             />
                           </div>
-                          <div className="sm:col-span-2">
+                          <div>
                             <label className="block text-slate-400 mb-1">Billing Address *</label>
                             <input
                               type="text"
@@ -1066,7 +1187,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
       )}
 
       {/* ===================================================================== */}
-      {/* MODE 2: PUBLIC ORDER TRACKING PAGE (/track-order) WITH OTP SECURITY   */}
+      {/* MODE 2: PUBLIC ORDER TRACKING PAGE (/track-order) — NO OTP REQUIRED   */}
       {/* ===================================================================== */}
       {portalMode === 'TRACK_ORDER' && (
         <main className="flex-1 max-w-4xl w-full mx-auto px-6 py-8 space-y-6">
@@ -1076,18 +1197,16 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                 <span className="text-[11px] font-mono text-emerald-400">
                   https://checkout.xperiserv.in/track-order
                 </span>
-                <h1 className="text-lg font-bold text-white">
-                  Public Order Tracking &amp; OTP Verification
-                </h1>
+                <h1 className="text-lg font-bold text-white">Public Order Tracking</h1>
                 <p className="text-xs text-slate-400">
-                  Track your order status, courier tracking number, and GST invoice using your Order
-                  ID, registered email/mobile, and OTP verification.
+                  Enter your Order ID (or Invoice / Reference number) to instantly view your order
+                  status, courier tracking number, and GST invoice.
                 </p>
               </div>
             </div>
 
             <form
-              onSubmit={(e) => handleRequestTrackingOtp(e)}
+              onSubmit={(e) => handleTrackOrder(e)}
               className="grid grid-cols-1 sm:grid-cols-12 gap-3"
             >
               <div className="sm:col-span-5 relative">
@@ -1106,7 +1225,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                   type="text"
                   value={trackContactInput}
                   onChange={(e) => setTrackContactInput(e.target.value)}
-                  placeholder="Registered Email or Mobile"
+                  placeholder="Email or Mobile (Optional)"
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-xs text-white focus:outline-none focus:border-emerald-500"
                 />
               </div>
@@ -1116,41 +1235,10 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                   disabled={trackingLoading}
                   className="w-full py-2.5 px-4 text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition-colors whitespace-nowrap"
                 >
-                  {trackingLoading ? 'Verifying...' : 'Send OTP & Track'}
+                  {trackingLoading ? 'Tracking...' : 'Track Order'}
                 </button>
               </div>
             </form>
-
-            {/* OTP Verification Strip */}
-            {otpRequested && (
-              <form
-                onSubmit={handleVerifyOtpManual}
-                className="bg-slate-950 border border-slate-800 rounded-lg p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs"
-              >
-                <div className="flex items-center gap-2 text-slate-300">
-                  <KeyRound className="w-4 h-4 text-emerald-400" />
-                  <span>
-                    Mailgun SMTP OTP dispatched. Sandbox OTP code:{' '}
-                    <strong className="font-mono text-emerald-400">{sandboxOtpPreview}</strong>
-                  </span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={otpInput}
-                    onChange={(e) => setOtpInput(e.target.value)}
-                    placeholder="6-digit OTP"
-                    className="w-28 bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 font-mono text-white text-center"
-                  />
-                  <button
-                    type="submit"
-                    className="px-3 py-1.5 bg-emerald-600 text-white font-semibold rounded hover:bg-emerald-500"
-                  >
-                    Verify OTP
-                  </button>
-                </div>
-              </form>
-            )}
 
             <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
               <span>Sample Order IDs:</span>
@@ -1160,7 +1248,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                   type="button"
                   onClick={() => {
                     setTrackOrderIdInput(sampleId);
-                    handleRequestTrackingOtp(undefined, sampleId);
+                    handleTrackOrder(undefined, sampleId);
                   }}
                   className="font-mono text-emerald-400 hover:underline"
                 >
@@ -1723,6 +1811,31 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                           />
                         </div>
                         <div>
+                          <label className="block text-xs text-slate-400 mb-1">
+                            Customer GSTIN (Optional — 15-Digit GST No.)
+                          </label>
+                          <input
+                            type="text"
+                            maxLength={15}
+                            value={customerGstin}
+                            onChange={(e) => setCustomerGstin(e.target.value.toUpperCase())}
+                            placeholder="29ABCDE1234F1Z5"
+                            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-slate-100 uppercase focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-slate-400 mb-1">
+                            Company / Legal Entity Name (Optional)
+                          </label>
+                          <input
+                            type="text"
+                            value={companyName}
+                            onChange={(e) => setCompanyName(e.target.value)}
+                            placeholder="Enterprise Pvt. Ltd."
+                            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                        <div className="sm:col-span-2">
                           <label className="block text-xs text-slate-400 mb-1">
                             Billing Address
                           </label>
