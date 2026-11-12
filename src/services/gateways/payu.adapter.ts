@@ -50,38 +50,94 @@ export interface PayUCallbackPayload {
 }
 
 export class PayUIndiaAdapter {
-  /**
-   * Official PayU India SHA-512 Payment Request Hash Specification:
-   * sha512(key|txnid|amount|productinfo|firstname|email|udf1|udf2|udf3|udf4|udf5||||||SALT)
-   */
-  static generatePaymentHash(input: PayUPaymentInitiationInput, config: PayUConfig): string {
-    const udf1 = input.udf1 || '';
-    const udf2 = input.udf2 || '';
-    const udf3 = input.udf3 || '';
-    const udf4 = input.udf4 || '';
-    const udf5 = input.udf5 || '';
+  static sanitizeFields(input: PayUPaymentInitiationInput, config: PayUConfig) {
+    const cleanKey = String(config.merchantKey || '')
+      .replace(/['"\r\n\t|]/g, '')
+      .trim();
+    const cleanSalt = String(config.merchantSalt || '')
+      .replace(/['"\r\n\t|]/g, '')
+      .trim();
+    const cleanTxnid =
+      String(input.txnid || '')
+        .replace(/[^a-zA-Z0-9_-]/g, '')
+        .trim()
+        .slice(0, 25) || `TXN${Date.now()}`;
+    const numericAmount = Number(input.amountRupees);
+    const cleanAmount = Number.isFinite(numericAmount)
+      ? numericAmount.toFixed(2)
+      : String(input.amountRupees || '0.00').trim();
+    const cleanProductinfo =
+      String(input.productinfo || 'Order')
+        .replace(/[|<>\r\n\t]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 100) || 'Order';
+    const cleanFirstname =
+      String(input.firstname || 'Customer')
+        .replace(/[|<>\r\n\t]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 60) || 'Customer';
+    const cleanEmail =
+      String(input.email || 'customer@xperiserv.in')
+        .replace(/[|<>\r\n\t\s]/g, '')
+        .trim() || 'customer@xperiserv.in';
+    const digitsPhone = String(input.phone || '').replace(/\D/g, '');
+    const cleanPhone = digitsPhone.length >= 10 ? digitsPhone.slice(-10) : '9845011209';
 
-    const hashSequence = [
-      config.merchantKey,
-      input.txnid,
-      input.amountRupees,
-      input.productinfo,
-      input.firstname,
-      input.email,
+    const udf1 = String(input.udf1 || '').replace(/[|\r\n\t]/g, '').trim();
+    const udf2 = String(input.udf2 || '').replace(/[|\r\n\t]/g, '').trim();
+    const udf3 = String(input.udf3 || '').replace(/[|\r\n\t]/g, '').trim();
+    const udf4 = String(input.udf4 || '').replace(/[|\r\n\t]/g, '').trim();
+    const udf5 = String(input.udf5 || '').replace(/[|\r\n\t]/g, '').trim();
+
+    return {
+      key: cleanKey,
+      salt: cleanSalt,
+      txnid: cleanTxnid,
+      amount: cleanAmount,
+      productinfo: cleanProductinfo,
+      firstname: cleanFirstname,
+      email: cleanEmail,
+      phone: cleanPhone,
+      surl: String(input.surl || '').trim(),
+      furl: String(input.furl || '').trim(),
       udf1,
       udf2,
       udf3,
       udf4,
       udf5,
+    };
+  }
+
+  /**
+   * Official PayU India SHA-512 Payment Request Hash Specification:
+   * sha512(key|txnid|amount|productinfo|firstname|email|udf1|udf2|udf3|udf4|udf5||||||SALT)
+   */
+  static generatePaymentHash(input: PayUPaymentInitiationInput, config: PayUConfig): string {
+    const f = this.sanitizeFields(input, config);
+
+    const hashSequence = [
+      f.key,
+      f.txnid,
+      f.amount,
+      f.productinfo,
+      f.firstname,
+      f.email,
+      f.udf1,
+      f.udf2,
+      f.udf3,
+      f.udf4,
+      f.udf5,
       '',
       '',
       '',
       '',
       '',
-      config.merchantSalt,
+      f.salt,
     ].join('|');
 
-    return crypto.createHash('sha512').update(hashSequence).digest('hex');
+    return crypto.createHash('sha512').update(hashSequence, 'utf8').digest('hex').toLowerCase();
   }
 
   /**
@@ -89,14 +145,16 @@ export class PayUIndiaAdapter {
    * [additionalCharges|]SALT|status||||||udf5|udf4|udf3|udf2|udf1|email|firstname|productinfo|amount|txnid|key
    */
   static verifyCallbackHash(payload: PayUCallbackPayload, config: PayUConfig): boolean {
-    const udf1 = payload.udf1 || '';
-    const udf2 = payload.udf2 || '';
-    const udf3 = payload.udf3 || '';
-    const udf4 = payload.udf4 || '';
-    const udf5 = payload.udf5 || '';
+    const cleanSalt = String(config.merchantSalt || '').replace(/['"\r\n\t|]/g, '').trim();
+    const cleanKey = String(payload.key || config.merchantKey || '').replace(/['"\r\n\t|]/g, '').trim();
+    const udf1 = String(payload.udf1 || '');
+    const udf2 = String(payload.udf2 || '');
+    const udf3 = String(payload.udf3 || '');
+    const udf4 = String(payload.udf4 || '');
+    const udf5 = String(payload.udf5 || '');
 
     const baseReverse = [
-      config.merchantSalt,
+      cleanSalt,
       payload.status,
       '',
       '',
@@ -113,14 +171,14 @@ export class PayUIndiaAdapter {
       payload.productinfo,
       payload.amount,
       payload.txnid,
-      config.merchantKey,
+      cleanKey,
     ].join('|');
 
     const fullReverseSequence = payload.additionalCharges
       ? `${payload.additionalCharges}|${baseReverse}`
       : baseReverse;
 
-    const computedHash = crypto.createHash('sha512').update(fullReverseSequence).digest('hex');
+    const computedHash = crypto.createHash('sha512').update(fullReverseSequence, 'utf8').digest('hex');
     try {
       return crypto.timingSafeEqual(
         Buffer.from(computedHash.toLowerCase(), 'utf8'),
@@ -136,12 +194,14 @@ export class PayUIndiaAdapter {
    * sha512(key|command|var1|salt)
    */
   static generateCommandHash(command: string, var1: string, config: PayUConfig): string {
-    const raw = `${config.merchantKey}|${command}|${var1}|${config.merchantSalt}`;
-    return crypto.createHash('sha512').update(raw).digest('hex');
+    const raw = `${config.merchantKey.trim()}|${command}|${var1}|${config.merchantSalt.trim()}`;
+    return crypto.createHash('sha512').update(raw, 'utf8').digest('hex').toLowerCase();
   }
 
-  static getEndpoints(environment: 'SANDBOX' | 'PRODUCTION') {
-    if (environment === 'PRODUCTION') {
+  static getEndpoints(environment: 'SANDBOX' | 'PRODUCTION', merchantKey?: string) {
+    // PayU official public test key gtKFFx only exists on test.payu.in
+    const effectiveEnv = merchantKey === 'gtKFFx' ? 'SANDBOX' : environment;
+    if (effectiveEnv === 'PRODUCTION') {
       return {
         checkoutActionUrl: 'https://secure.payu.in/_payment',
         postServiceUrl: 'https://info.payu.in/merchant/postservice.php?form=2',
@@ -154,28 +214,29 @@ export class PayUIndiaAdapter {
   }
 
   static buildCheckoutPayload(input: PayUPaymentInitiationInput, config: PayUConfig) {
+    const f = this.sanitizeFields(input, config);
     const hash = this.generatePaymentHash(input, config);
-    const endpoints = this.getEndpoints(config.environment);
+    const endpoints = this.getEndpoints(config.environment, f.key);
 
     return {
       gateway: 'PAYU',
-      environment: config.environment,
+      environment: f.key === 'gtKFFx' ? 'SANDBOX' : config.environment,
       actionUrl: endpoints.checkoutActionUrl,
       formFields: {
-        key: config.merchantKey,
-        txnid: input.txnid,
-        amount: input.amountRupees,
-        productinfo: input.productinfo,
-        firstname: input.firstname,
-        email: input.email,
-        phone: input.phone,
-        surl: input.surl,
-        furl: input.furl,
-        udf1: input.udf1 || '',
-        udf2: input.udf2 || '',
-        udf3: input.udf3 || '',
-        udf4: input.udf4 || '',
-        udf5: input.udf5 || '',
+        key: f.key,
+        txnid: f.txnid,
+        amount: f.amount,
+        productinfo: f.productinfo,
+        firstname: f.firstname,
+        email: f.email,
+        phone: f.phone,
+        surl: f.surl,
+        furl: f.furl,
+        udf1: f.udf1,
+        udf2: f.udf2,
+        udf3: f.udf3,
+        udf4: f.udf4,
+        udf5: f.udf5,
         hash,
         ...(input.pg ? { pg: input.pg } : {}),
         ...(input.bankcode ? { bankcode: input.bankcode } : {}),

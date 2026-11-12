@@ -423,8 +423,14 @@ export default function App() {
               environment: gw.environment || 'PRODUCTION',
               merchantId: gw.merchantId || '',
               publicKeyOrClientId: gw.publicKeyOrClientId || '',
-              secretOrSalt: prev[gw.code]?.secretOrSalt || '',
-              webhookSecret: prev[gw.code]?.webhookSecret || '',
+              secretOrSalt:
+                gw.secretOrSalt !== undefined
+                  ? gw.secretOrSalt
+                  : prev[gw.code]?.secretOrSalt || '',
+              webhookSecret:
+                gw.webhookSecret !== undefined
+                  ? gw.webhookSecret
+                  : prev[gw.code]?.webhookSecret || '',
               supportedCurrencies: gw.supportedCurrencies || 'INR',
               supportedMethods: gw.supportedMethods || 'UPI,CARD,NETBANKING',
             };
@@ -797,23 +803,26 @@ export default function App() {
   };
 
   const handleSaveGatewayCredentials = async (gw: any) => {
-    const draft = gatewayEdits[gw.code];
-    if (!draft) return;
+    const draft = gatewayEdits[gw.code] || {
+      environment: gw.environment || 'PRODUCTION',
+      merchantId: gw.merchantId || '',
+      publicKeyOrClientId: gw.publicKeyOrClientId || '',
+      secretOrSalt: gw.secretOrSalt || '',
+      webhookSecret: gw.webhookSecret || '',
+      supportedCurrencies: gw.supportedCurrencies || 'INR',
+      supportedMethods: gw.supportedMethods || 'UPI,CARD',
+    };
     setSavingGatewayCode(gw.code);
     try {
       const payload: Record<string, any> = {
         environment: draft.environment,
-        merchantId: draft.merchantId,
-        publicKeyOrClientId: draft.publicKeyOrClientId,
+        merchantId: (draft.merchantId || '').trim(),
+        publicKeyOrClientId: (draft.publicKeyOrClientId || '').trim(),
+        secretOrSalt: (draft.secretOrSalt || '').trim(),
+        webhookSecret: (draft.webhookSecret || '').trim(),
         supportedCurrencies: draft.supportedCurrencies,
         supportedMethods: draft.supportedMethods,
       };
-      if (draft.secretOrSalt && draft.secretOrSalt.trim().length > 0) {
-        payload.secretOrSalt = draft.secretOrSalt.trim();
-      }
-      if (draft.webhookSecret && draft.webhookSecret.trim().length > 0) {
-        payload.webhookSecret = draft.webhookSecret.trim();
-      }
 
       const res = await fetch(`/api/v1/gateways/${gw.code}`, {
         method: 'PATCH',
@@ -823,14 +832,20 @@ export default function App() {
       const data = await res.json();
       if (res.ok) {
         await fetchPlatformData();
-        setGatewayEdits((prev) => ({
-          ...prev,
-          [gw.code]: {
-            ...(prev[gw.code] || draft),
-            secretOrSalt: '',
-            webhookSecret: '',
-          },
-        }));
+        if (data.gateway) {
+          setGatewayEdits((prev) => ({
+            ...prev,
+            [gw.code]: {
+              environment: data.gateway.environment || draft.environment,
+              merchantId: data.gateway.merchantId || '',
+              publicKeyOrClientId: data.gateway.publicKeyOrClientId || '',
+              secretOrSalt: data.gateway.secretOrSalt || '',
+              webhookSecret: data.gateway.webhookSecret || '',
+              supportedCurrencies: data.gateway.supportedCurrencies || draft.supportedCurrencies,
+              supportedMethods: data.gateway.supportedMethods || draft.supportedMethods,
+            },
+          }));
+        }
         showToast(`Saved ${gw.displayName} keys & configuration`);
       } else {
         showToast(data.error || `Failed to update ${gw.displayName}`);
@@ -850,17 +865,13 @@ export default function App() {
       if (draft) {
         const savePayload: Record<string, any> = {
           environment: draft.environment,
-          merchantId: draft.merchantId,
-          publicKeyOrClientId: draft.publicKeyOrClientId,
+          merchantId: (draft.merchantId || '').trim(),
+          publicKeyOrClientId: (draft.publicKeyOrClientId || '').trim(),
+          secretOrSalt: (draft.secretOrSalt || '').trim(),
+          webhookSecret: (draft.webhookSecret || '').trim(),
           supportedCurrencies: draft.supportedCurrencies,
           supportedMethods: draft.supportedMethods,
         };
-        if (draft.secretOrSalt && draft.secretOrSalt.trim().length > 0) {
-          savePayload.secretOrSalt = draft.secretOrSalt.trim();
-        }
-        if (draft.webhookSecret && draft.webhookSecret.trim().length > 0) {
-          savePayload.webhookSecret = draft.webhookSecret.trim();
-        }
         await fetch(`/api/v1/gateways/${gw.code}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -2779,8 +2790,8 @@ export default function App() {
                         environment: gw.environment || 'PRODUCTION',
                         merchantId: gw.merchantId || '',
                         publicKeyOrClientId: gw.publicKeyOrClientId || '',
-                        secretOrSalt: '',
-                        webhookSecret: '',
+                        secretOrSalt: gw.secretOrSalt || '',
+                        webhookSecret: gw.webhookSecret || '',
                         supportedCurrencies: gw.supportedCurrencies || 'INR',
                         supportedMethods: gw.supportedMethods || 'UPI,CARD',
                       };
@@ -2943,6 +2954,47 @@ export default function App() {
                                 </div>
                                 <div className="text-[11px] font-mono text-slate-400">
                                   Setup Fee: ₹0 · Annual Maintenance (AMC): ₹0 · Protocol: JWE/JWS (x-gl-token)
+                                </div>
+                              </div>
+                            )}
+
+                            {isPayU && (
+                              <div className="bg-slate-950 border border-emerald-500/30 rounded-lg p-3.5 space-y-2 text-xs">
+                                <div className="flex items-center justify-between">
+                                  <span className="font-semibold text-emerald-300">
+                                    PayU India Hosted Checkout (SHA-512 Hash Parameter Guide)
+                                  </span>
+                                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300">
+                                    {draft.environment === 'PRODUCTION'
+                                      ? 'secure.payu.in/_payment'
+                                      : 'test.payu.in/_payment'}
+                                  </span>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
+                                  <div className="bg-slate-900/90 border border-slate-800 rounded p-2">
+                                    <div className="text-slate-400">Active Key (`key`)</div>
+                                    <div className="text-white font-bold truncate mt-0.5">
+                                      {draft.publicKeyOrClientId?.trim() ||
+                                        draft.merchantId?.trim() ||
+                                        'Not Configured'}
+                                    </div>
+                                  </div>
+                                  <div className="bg-slate-900/90 border border-slate-800 rounded p-2">
+                                    <div className="text-slate-400">Active Salt (`SALT`)</div>
+                                    <div className="text-emerald-400 font-bold truncate mt-0.5">
+                                      {draft.secretOrSalt?.trim()
+                                        ? `${draft.secretOrSalt.trim().length} chars configured`
+                                        : 'Not Configured'}
+                                    </div>
+                                  </div>
+                                </div>
+                                <div className="text-[11px] text-slate-400 leading-relaxed">
+                                  Paste your exact <strong className="text-slate-200">PayU Merchant Key</strong> and{' '}
+                                  <strong className="text-slate-200">PayU Merchant Salt</strong> from{' '}
+                                  <span className="font-mono text-emerald-400">
+                                    PayU Dashboard → Developer → API Keys
+                                  </span>
+                                  . Click <strong className="text-emerald-300">Show</strong> next to Salt to inspect the exact saved string.
                                 </div>
                               </div>
                             )}

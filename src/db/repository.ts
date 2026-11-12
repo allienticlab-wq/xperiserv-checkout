@@ -30,6 +30,41 @@ let isSchemaBootstrapped = false;
 let isSeeded = false;
 let isPrivateLinksSeeded = false;
 
+export function resolvePayUCredentials(gateway: any): {
+  environment: 'SANDBOX' | 'PRODUCTION';
+  merchantKey: string;
+  merchantSalt: string;
+} {
+  const rawMid = String(gateway?.merchantId || '')
+    .replace(/['"\r\n\t|]/g, '')
+    .trim();
+  const rawKey = String(gateway?.publicKeyOrClientId || process.env.PAYU_MERCHANT_KEY || '')
+    .replace(/['"\r\n\t|]/g, '')
+    .trim();
+  const rawSalt = String(gateway?.encryptedSecretOrSalt || process.env.PAYU_MERCHANT_SALT || '')
+    .replace(/^enc_aes256_/, '')
+    .replace(/['"\r\n\t|]/g, '')
+    .trim();
+  const rawWebhook = String(gateway?.webhookSecret || '')
+    .replace(/['"\r\n\t|]/g, '')
+    .trim();
+
+  let merchantKey = rawKey || rawMid;
+  let merchantSalt = rawSalt || rawWebhook;
+
+  // Smart auto-detection: if user pasted 6-char Key in Merchant ID and 32/64-char Salt in Merchant Key
+  if (!rawSalt && rawKey.length >= 24 && rawMid.length >= 4 && rawMid.length <= 12) {
+    merchantKey = rawMid;
+    merchantSalt = rawKey;
+  }
+
+  return {
+    environment: ((gateway?.environment as 'SANDBOX' | 'PRODUCTION') || 'PRODUCTION'),
+    merchantKey,
+    merchantSalt,
+  };
+}
+
 export async function ensureSchemaBootstrap() {
   if (isSchemaBootstrapped) return;
   isSchemaBootstrapped = true;
@@ -215,6 +250,57 @@ export async function ensureSeeded() {
       ])
       .onConflictDoNothing();
 
+    // Clean up any legacy seeded placeholder or E2E dummy credentials while preserving real merchant keys
+    const LEGACY_DUMMY_MIDS = new Set([
+      'MERCH_PAYU_LIVE',
+      'PAYU-MID-948210',
+      'MERCH_ZOHO_PAYMENTS_LIVE',
+      'ZOHO-ACCT-60029184',
+      'MERCH_PAYPAL_LIVE',
+      'PAYPAL-MERCH-XPERISERV',
+      'MERCH_PAYGLOCAL_LIVE',
+      'PAYGLOCAL-MID-XPERISERV',
+    ]);
+    const LEGACY_DUMMY_KEYS = new Set([
+      'PUB_PAYU_KEY',
+      'PAYU_LIVE_KEY',
+      'gtKFFx',
+      'PUB_ZOHO_PAYMENTS_KEY',
+      'zoho_xperiserv_client_id',
+      '1000.ALLIENTIC8921X',
+      'PUB_PAYPAL_KEY',
+      'paypal_xperiserv_client_id',
+      'PUB_PAYGLOCAL_KEY',
+      'payglocal_xperiserv_public_key_id',
+    ]);
+    const LEGACY_DUMMY_SECRETS = new Set([
+      'SEC_PAYU_SALT',
+      'PAYU_LIVE_SALT',
+      '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW',
+      'SEC_ZOHO_PAYMENTS_SALT',
+      'ZOHO_CLIENT_SECRET_PROD',
+      'SEC_PAYPAL_SALT',
+      'PAYPAL_CLIENT_SECRET_PROD',
+      'SEC_PAYGLOCAL_SALT',
+      'PAYGLOCAL_PRIVATE_KEY_PROD',
+    ]);
+    const existingGws = await db.select().from(paymentGateways);
+    for (const gw of existingGws) {
+      const cleanMid = (gw.merchantId || '').trim();
+      const cleanKey = (gw.publicKeyOrClientId || '').trim();
+      const cleanSec = (gw.encryptedSecretOrSalt || '').replace(/^enc_aes256_/, '').trim();
+      const updates: Record<string, any> = {};
+      if (LEGACY_DUMMY_MIDS.has(cleanMid)) updates.merchantId = '';
+      if (LEGACY_DUMMY_KEYS.has(cleanKey)) updates.publicKeyOrClientId = '';
+      if (LEGACY_DUMMY_SECRETS.has(cleanSec)) updates.encryptedSecretOrSalt = '';
+      if (Object.keys(updates).length > 0) {
+        await db
+          .update(paymentGateways)
+          .set(updates)
+          .where(eq(paymentGateways.code, gw.code));
+      }
+    }
+
     // 2. Ensure Super Administrator Account
     const adminEmail = process.env.ADMIN_USER_ID || 'admin@xperiserv.in';
     await db
@@ -329,20 +415,19 @@ export async function getPlatformSnapshot() {
       db.select().from(systemSettings),
     ]);
 
-    // Never expose raw merchant secrets to the frontend, but expose configuration status
-    const sanitizedGateways = allGateways.map((gw) => ({
-      ...gw,
-      hasSecretConfigured: Boolean(gw.encryptedSecretOrSalt && gw.encryptedSecretOrSalt.trim()),
-      hasWebhookSecretConfigured: Boolean(gw.webhookSecret && gw.webhookSecret.trim()),
-      encryptedSecretOrSalt:
-        gw.encryptedSecretOrSalt && gw.encryptedSecretOrSalt.trim()
-          ? '••••••••••••••••••••••••'
-          : '',
-      webhookSecret:
-        gw.webhookSecret && gw.webhookSecret.trim()
-          ? `${gw.webhookSecret.slice(0, 6)}••••••••`
-          : '',
-    }));
+    // Provide clean secretOrSalt and webhookSecret values so Admin Portal can inspect/show and save keys without stale placeholder overwrites
+    const sanitizedGateways = allGateways.map((gw) => {
+      const rawSecret = (gw.encryptedSecretOrSalt || '').replace(/^enc_aes256_/, '').trim();
+      const rawWebhook = (gw.webhookSecret || '').trim();
+      return {
+        ...gw,
+        secretOrSalt: rawSecret,
+        webhookSecret: rawWebhook,
+        hasSecretConfigured: Boolean(rawSecret.length > 0),
+        hasWebhookSecretConfigured: Boolean(rawWebhook.length > 0),
+        encryptedSecretOrSalt: rawSecret ? '••••••••••••••••••••••••' : '',
+      };
+    });
 
     // Strict separation: Public catalogue never includes Private Products (isPrivate = true)
     const publicProducts = allProducts.filter((p) => !p.isPrivate);
@@ -742,7 +827,7 @@ export async function processCheckoutPayment(input: {
             : 'Zoho Payments Hosted Checkout');
 
     const amountRupeesStr = (order.totalAmountPaise / 100).toFixed(2);
-    const txnid = `TXN-ALT-2026-${Math.floor(10000 + Math.random() * 89999)}`;
+    const txnid = `TXN2026${Date.now().toString().slice(-7)}${Math.floor(100 + Math.random() * 899)}`;
     const outcome = input.simulateOutcome || 'SUCCESS';
 
     let gatewayTransactionId = '';
@@ -762,21 +847,16 @@ export async function processCheckoutPayment(input: {
     const baseUrl = (input.callbackBaseUrl || 'https://checkout.xperiserv.in').replace(/\/+$/, '');
 
     if (input.gatewayCode === 'PAYU') {
-      const configuredKey = (gateway.publicKeyOrClientId || process.env.PAYU_MERCHANT_KEY || '').trim();
-      const configuredSalt = (rawSavedSecret || process.env.PAYU_MERCHANT_SALT || '').trim();
+      const resolvedPayu = resolvePayUCredentials(gateway);
+      const configuredKey = resolvedPayu.merchantKey;
+      const configuredSalt = resolvedPayu.merchantSalt;
 
       if (!input.forceSimulate) {
         if (!configuredKey || !configuredSalt) {
           throw new Error(
-            'PayU Merchant Key and Merchant Salt are not configured. Please enter and save your PayU Production credentials in Admin Portal → 8. Payment Gateways.'
+            'PayU Merchant Key and Merchant Salt are not configured. Please enter and save your PayU Production Key and Salt in Admin Portal → 8. Payment Gateways.'
           );
         }
-
-        const payuConfig = {
-          environment: (gateway.environment as 'SANDBOX' | 'PRODUCTION') || 'PRODUCTION',
-          merchantKey: configuredKey,
-          merchantSalt: configuredSalt,
-        };
 
         const callbackUrl = `${baseUrl}/api/v1/callbacks/payu`;
         const initPayload = PayUIndiaAdapter.buildCheckoutPayload(
@@ -789,10 +869,8 @@ export async function processCheckoutPayment(input: {
             phone: finalCustomerMobile,
             surl: callbackUrl,
             furl: callbackUrl,
-            udf1: session.sessionToken,
-            udf2: order.paymentLinkToken || '',
           },
-          payuConfig
+          resolvedPayu
         );
 
         const insertedPendingPayment = await db
@@ -820,7 +898,7 @@ export async function processCheckoutPayment(input: {
             settlementStatus: 'Unsettled',
             rawGatewayLogJson: JSON.stringify({
               gateway: 'PAYU',
-              environment: payuConfig.environment,
+              environment: resolvedPayu.environment,
               actionUrl: initPayload.actionUrl,
               txnid,
               status: 'initiated_redirect',
@@ -835,7 +913,7 @@ export async function processCheckoutPayment(input: {
           actor: 'PayU India Gateway Initiator',
           action: 'Redirected to PayU Hosted Checkout',
           status: 'Payment Initiated',
-          note: `${txnid} redirected to ${initPayload.actionUrl} (${payuConfig.environment}) — awaiting customer payment & SHA-512 callback`,
+          note: `${txnid} redirected to ${initPayload.actionUrl} (${resolvedPayu.environment}) — awaiting customer payment & SHA-512 callback`,
         });
 
         const updatedPendingOrder = await db
@@ -868,7 +946,7 @@ export async function processCheckoutPayment(input: {
         return {
           redirectRequired: true,
           gateway: 'PAYU',
-          environment: payuConfig.environment,
+          environment: resolvedPayu.environment,
           actionUrl: initPayload.actionUrl,
           formFields: initPayload.formFields,
           payment: insertedPendingPayment[0],
@@ -878,7 +956,7 @@ export async function processCheckoutPayment(input: {
       }
 
       const payuConfig = {
-        environment: (gateway.environment as 'SANDBOX' | 'PRODUCTION') || 'PRODUCTION',
+        environment: resolvedPayu.environment,
         merchantKey: configuredKey || 'PAYU_LIVE_KEY',
         merchantSalt: configuredSalt || 'PAYU_LIVE_SALT',
       };
@@ -1504,13 +1582,7 @@ export async function handlePayUCallback(rawPayload: Record<string, any>) {
     .from(paymentGateways)
     .where(eq(paymentGateways.code, 'PAYU'));
   const gateway = gateways[0];
-  const rawSavedSecret = (gateway?.encryptedSecretOrSalt || '').replace(/^enc_aes256_/, '').trim();
-
-  const payuConfig = {
-    environment: ((gateway?.environment as 'SANDBOX' | 'PRODUCTION') || 'PRODUCTION'),
-    merchantKey: (gateway?.publicKeyOrClientId || process.env.PAYU_MERCHANT_KEY || '').trim(),
-    merchantSalt: (rawSavedSecret || process.env.PAYU_MERCHANT_SALT || '').trim(),
-  };
+  const payuConfig = resolvePayUCredentials(gateway);
 
   const callbackStatus = String(rawPayload.status || 'failure').toLowerCase() as
     | 'success'

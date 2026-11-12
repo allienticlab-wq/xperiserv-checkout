@@ -31,6 +31,7 @@ import {
   initiateRefund,
   processCheckoutPayment,
   purgeAllTestData,
+  resolvePayUCredentials,
 } from './src/db/repository.ts';
 import { optionalAuth, AuthRequest } from './src/middleware/auth.ts';
 import { WebhookService } from './src/services/webhook.service.ts';
@@ -1527,21 +1528,47 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
       }
     }
 
+    let cleanMid =
+      merchantId !== undefined
+        ? String(merchantId).replace(/['"\r\n\t|]/g, '').trim()
+        : existing[0].merchantId || '';
+    let cleanKey =
+      publicKeyOrClientId !== undefined
+        ? String(publicKeyOrClientId).replace(/['"\r\n\t|]/g, '').trim()
+        : existing[0].publicKeyOrClientId || '';
+    let cleanIncomingSecret =
+      secretOrSalt !== undefined && !String(secretOrSalt).includes('••')
+        ? String(secretOrSalt)
+            .replace(/^enc_aes256_/, '')
+            .replace(/['"\r\n\t|]/g, '')
+            .trim()
+        : undefined;
+
+    // Smart auto-correction for PayU if user pasted Key into Merchant ID and Salt into Merchant Key
+    if (
+      code === 'PAYU' &&
+      (!cleanIncomingSecret || cleanIncomingSecret.length === 0) &&
+      cleanKey.length >= 24 &&
+      cleanMid.length >= 4 &&
+      cleanMid.length <= 12
+    ) {
+      cleanIncomingSecret = cleanKey;
+      cleanKey = cleanMid;
+    }
+
     const nextSecret =
-      secretOrSalt !== undefined
-        ? secretOrSalt === ''
+      cleanIncomingSecret !== undefined
+        ? cleanIncomingSecret === ''
           ? ''
-          : !secretOrSalt.includes('••')
-          ? `enc_aes256_${secretOrSalt.replace(/^enc_aes256_/, '').trim()}`
-          : existing[0].encryptedSecretOrSalt
+          : `enc_aes256_${cleanIncomingSecret}`
         : existing[0].encryptedSecretOrSalt;
 
     const nextWebhookSecret =
       webhookSecret !== undefined
         ? webhookSecret === ''
           ? ''
-          : !webhookSecret.includes('••')
-          ? webhookSecret.trim()
+          : !String(webhookSecret).includes('••')
+          ? String(webhookSecret).replace(/['"\r\n\t|]/g, '').trim()
           : existing[0].webhookSecret
         : existing[0].webhookSecret;
 
@@ -1551,11 +1578,8 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
         enabled: enabled !== undefined ? Boolean(enabled) : existing[0].enabled,
         isDefault: isDefault !== undefined ? Boolean(isDefault) : existing[0].isDefault,
         environment: environment || existing[0].environment,
-        merchantId: merchantId !== undefined ? String(merchantId).trim() : existing[0].merchantId,
-        publicKeyOrClientId:
-          publicKeyOrClientId !== undefined
-            ? String(publicKeyOrClientId).trim()
-            : existing[0].publicKeyOrClientId,
+        merchantId: cleanMid,
+        publicKeyOrClientId: cleanKey,
         encryptedSecretOrSalt: nextSecret,
         webhookSecret: nextWebhookSecret,
         minTransactionPaise:
@@ -1580,6 +1604,10 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
       .where(eq(paymentGateways.code, code))
       .returning();
 
+    const rawUpdatedSecret = (updated[0].encryptedSecretOrSalt || '')
+      .replace(/^enc_aes256_/, '')
+      .trim();
+
     await db.insert(auditLogs).values({
       actorEmail: req.dbUser?.email || 'admin@xperiserv.in',
       actorRole: req.dbUser?.role || 'Super Administrator',
@@ -1594,10 +1622,7 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
         environment: updated[0].environment,
         merchantId: updated[0].merchantId,
         publicKeyOrClientId: updated[0].publicKeyOrClientId,
-        hasSecretConfigured: Boolean(
-          updated[0].encryptedSecretOrSalt &&
-            updated[0].encryptedSecretOrSalt.replace(/^enc_aes256_/, '').length > 0
-        ),
+        hasSecretConfigured: Boolean(rawUpdatedSecret.length > 0),
         hasWebhookSecretConfigured: Boolean(
           updated[0].webhookSecret && updated[0].webhookSecret.length > 0
         ),
@@ -1607,18 +1632,13 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
     res.json({
       gateway: {
         ...updated[0],
-        hasSecretConfigured: Boolean(
-          updated[0].encryptedSecretOrSalt &&
-            updated[0].encryptedSecretOrSalt.replace(/^enc_aes256_/, '').length > 0
-        ),
+        secretOrSalt: rawUpdatedSecret,
+        webhookSecret: updated[0].webhookSecret || '',
+        hasSecretConfigured: Boolean(rawUpdatedSecret.length > 0),
         hasWebhookSecretConfigured: Boolean(
           updated[0].webhookSecret && updated[0].webhookSecret.length > 0
         ),
-        encryptedSecretOrSalt:
-          updated[0].encryptedSecretOrSalt &&
-          updated[0].encryptedSecretOrSalt.replace(/^enc_aes256_/, '').length > 0
-            ? '••••••••••••••••••••••••'
-            : '',
+        encryptedSecretOrSalt: rawUpdatedSecret ? '••••••••••••••••••••••••' : '',
       },
     });
   } catch (error: any) {
@@ -1651,11 +1671,22 @@ app.post('/api/v1/gateways/:code/verify', optionalAuth, async (req: AuthRequest,
     let verified = hasPublicKey && hasSecret;
 
     if (code === 'PAYU') {
-      const sampleChain = `${gw.publicKeyOrClientId || 'MISSING_KEY'}|TXN_VERIFY_${Date.now()}|100.00|Allientic Checkout|Admin|admin@xperiserv.in|||||||||||${rawSecret || 'MISSING_SALT'}`;
-      signaturePreview = crypto.createHash('sha512').update(sampleChain).digest('hex').slice(0, 32) + '...';
+      const resolved = resolvePayUCredentials(gw);
+      verified = Boolean(resolved.merchantKey && resolved.merchantSalt);
+      const sampleChain = `${resolved.merchantKey || 'MISSING_KEY'}|TXN_VERIFY_${Date.now()}|100.00|Allientic Checkout|Admin|admin@xperiserv.in|||||||||||${resolved.merchantSalt || 'MISSING_SALT'}`;
+      signaturePreview =
+        crypto.createHash('sha512').update(sampleChain, 'utf8').digest('hex').slice(0, 32) + '...';
+      const targetUrl =
+        resolved.environment === 'PRODUCTION' && resolved.merchantKey !== 'gtKFFx'
+          ? 'https://secure.payu.in/_payment'
+          : 'https://test.payu.in/_payment';
+      const isNumericKeyWarning =
+        /^\d{6,12}$/.test(resolved.merchantKey)
+          ? ' (Warning: Key looks like a numeric Merchant ID — ensure you entered your alphanumeric PayU Key from PayU Dashboard → Developer → API Keys, not your MID)'
+          : '';
       liveApiMessage = verified
-        ? `PayU India SHA-512 Merchant Key (${gw.publicKeyOrClientId}) & Salt verified (${gw.environment}).`
-        : 'Missing PayU Merchant Key or Merchant Salt.';
+        ? `PayU India SHA-512 Key "${resolved.merchantKey}" (${resolved.merchantKey.length} chars) & Salt (${resolved.merchantSalt.length} chars) ready for ${targetUrl}.${isNumericKeyWarning}`
+        : 'Missing PayU Merchant Key or Merchant Salt. Please enter both from PayU Dashboard → Developer → API Keys.';
     } else if (code === 'ZOHO_PAYMENTS') {
       signaturePreview =
         crypto
