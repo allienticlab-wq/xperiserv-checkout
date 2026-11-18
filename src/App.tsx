@@ -3329,7 +3329,7 @@ export default function App() {
                                           <span>Upload .pem</span>
                                           <input
                                             type="file"
-                                            accept=".pem,.key,.txt"
+                                            accept=".pem,.key,.p8,.txt"
                                             className="hidden"
                                             onChange={(e) => {
                                               const file = e.target.files?.[0];
@@ -3340,13 +3340,25 @@ export default function App() {
                                                   typeof reader.result === 'string'
                                                     ? reader.result
                                                     : '';
+                                                if (
+                                                  text.includes('BEGIN PUBLIC KEY') ||
+                                                  text.includes('BEGIN CERTIFICATE')
+                                                ) {
+                                                  showToast(
+                                                    'Warning: That file looks like a Public Key/Certificate. Upload your Private Key (.pem) here and Public Key in the field below.'
+                                                  );
+                                                } else {
+                                                  showToast(
+                                                    `Loaded Merchant Private Key (${file.name}, ${text.trim().length} bytes)`
+                                                  );
+                                                }
                                                 setGatewayEdits((prev) => ({
                                                   ...prev,
-                                                  [gw.code]: { ...draft, secretOrSalt: text },
+                                                  [gw.code]: {
+                                                    ...(prev[gw.code] || draft),
+                                                    secretOrSalt: text,
+                                                  },
                                                 }));
-                                                showToast(
-                                                  `Loaded Merchant Private Key (${file.name}, ${text.trim().length} bytes)`
-                                                );
                                               };
                                               reader.readAsText(file);
                                               e.target.value = '';
@@ -3374,7 +3386,10 @@ export default function App() {
                                         onChange={(e) =>
                                           setGatewayEdits((prev) => ({
                                             ...prev,
-                                            [gw.code]: { ...draft, secretOrSalt: e.target.value },
+                                            [gw.code]: {
+                                              ...(prev[gw.code] || draft),
+                                              secretOrSalt: e.target.value,
+                                            },
                                           }))
                                         }
                                         placeholder={`-----BEGIN PRIVATE KEY-----\nUpload your .pem file or paste Merchant Private Key PEM here...\n-----END PRIVATE KEY-----`}
@@ -3393,7 +3408,7 @@ export default function App() {
                                   <div>
                                     <div className="flex items-center justify-between gap-2 mb-1">
                                       <label className="text-slate-400 font-medium text-emerald-300">
-                                        PayGlocal Public Key (.pem file — for JWE Encryption &amp; Callback Verification)
+                                        PayGlocal Public Key (.pem file — Required for JWE Encryption) *
                                       </label>
                                       <label className="cursor-pointer inline-flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 hover:bg-slate-700 text-[11px] font-medium">
                                         <Upload className="w-3 h-3" />
@@ -3411,16 +3426,22 @@ export default function App() {
                                                 typeof reader.result === 'string'
                                                   ? reader.result
                                                   : '';
+                                              if (text.includes('PRIVATE KEY')) {
+                                                showToast(
+                                                  'Warning: That file looks like a Private Key. Upload PayGlocal Public Key (.pem/.crt) here.'
+                                                );
+                                              } else {
+                                                showToast(
+                                                  `Loaded PayGlocal Public Key (${file.name}, ${text.trim().length} bytes)`
+                                                );
+                                              }
                                               setGatewayEdits((prev) => ({
                                                 ...prev,
                                                 [gw.code]: {
-                                                  ...draft,
+                                                  ...(prev[gw.code] || draft),
                                                   payglocalPublicKeyPem: text,
                                                 },
                                               }));
-                                              showToast(
-                                                `Loaded PayGlocal Public Key (${file.name}, ${text.trim().length} bytes)`
-                                              );
                                             };
                                             reader.readAsText(file);
                                             e.target.value = '';
@@ -3435,7 +3456,7 @@ export default function App() {
                                         setGatewayEdits((prev) => ({
                                           ...prev,
                                           [gw.code]: {
-                                            ...draft,
+                                            ...(prev[gw.code] || draft),
                                             payglocalPublicKeyPem: e.target.value,
                                           },
                                         }))

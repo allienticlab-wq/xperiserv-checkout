@@ -121,12 +121,14 @@ export class PayGlocalAdapter {
   }
 
   /**
-   * Generates PayGlocal JWS (`x-gl-token-external`) using Merchant RSA Private Key (.pem)
-   * over the SHA-256 base64 digest of either the JWE token or JSON payload.
+   * Generates PayGlocal JWS (`x-gl-token-external`) matching official `payglocal-js-client` (`utils/helper.js`):
+   * - Digest payload: { digest, digestAlgorithm: 'SHA-256', exp: 300000, iat: `${Date.now()}` }
+   * - Protected header: { alg: 'RS256', kid, 'x-gl-merchantId', 'issued-by', 'is-digested': 'true', 'x-gl-enc' }
    */
   static async generateJWS(
     dataToDigest: string,
-    config: PayGlocalConfig
+    config: PayGlocalConfig,
+    options?: { encryptedPayload?: boolean }
   ): Promise<{ jwsToken: string; digestBase64: string }> {
     const { pkcs8Pem } = toPkcs8PrivatePem(config.merchantPrivateKeyPem);
     const privateKey = await importPKCS8(pkcs8Pem, 'RS256');
@@ -149,17 +151,22 @@ export class PayGlocalAdapter {
       digest: digestBase64,
       digestAlgorithm: 'SHA-256',
       exp: 300000,
-      iat: String(Date.now()),
-      issuedBy: merchantId,
+      iat: `${Date.now()}`,
     });
+
+    const isEncrypted =
+      options?.encryptedPayload !== undefined
+        ? options.encryptedPayload
+        : Boolean(normalizePemString(config.payglocalPublicKeyPem || '', 'PUBLIC'));
 
     const jwsToken = await new CompactSign(Buffer.from(jwsClaims, 'utf8'))
       .setProtectedHeader({
         alg: 'RS256',
         kid,
         'x-gl-merchantId': merchantId,
+        'issued-by': merchantId,
         'is-digested': 'true',
-        'x-gl-enc': config.payglocalPublicKeyPem ? 'true' : 'false',
+        'x-gl-enc': isEncrypted ? 'true' : 'false',
       })
       .sign(privateKey);
 
@@ -167,7 +174,8 @@ export class PayGlocalAdapter {
   }
 
   /**
-   * Encrypts plaintext JSON payload with PayGlocal Public Key (.pem) using RSA-OAEP-256 + A128CBC-HS256.
+   * Encrypts plaintext JSON payload with PayGlocal Public Key (.pem) using RSA-OAEP-256 + A128CBC-HS256,
+   * matching official `payglocal-js-client` (`utils/helper.js` -> `generateJWEHeaderObject`).
    */
   static async generateJWE(plaintextJson: string, config: PayGlocalConfig): Promise<string> {
     if (!config.payglocalPublicKeyPem) {
@@ -178,16 +186,18 @@ export class PayGlocalAdapter {
     const kid = (config.publicKeyId || config.privateKeyId || '').trim();
     const merchantId = (config.merchantId || '').trim();
 
+    if (!kid) {
+      throw new Error('PayGlocal Public Key ID (kid) is required for JWE encryption.');
+    }
+
     const jweToken = await new CompactEncrypt(Buffer.from(plaintextJson, 'utf8'))
       .setProtectedHeader({
-        alg: 'RSA-OAEP-256',
+        'issued-by': merchantId,
         enc: 'A128CBC-HS256',
-        kid,
-        'x-gl-merchantId': merchantId,
-        'x-gl-enc': 'true',
-        iat: String(Date.now()),
         exp: 300000,
-        issuedBy: merchantId,
+        iat: `${Date.now()}`,
+        alg: 'RSA-OAEP-256',
+        kid,
       })
       .encrypt(publicKey);
 
@@ -205,57 +215,90 @@ export class PayGlocalAdapter {
     const numericAmt = Number(input.totalAmount);
     const cleanAmt = Number.isFinite(numericAmt) ? numericAmt.toFixed(2) : String(input.totalAmount);
 
+    // PayGlocal merchantTxnId (alphanumeric recommended, <= 40) & merchantUniqueId (alphanumeric 15..40 chars)
+    const rawTxnId = String(input.merchantTxnId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
+    const rawUniqueAlpha = String(input.merchantUniqueId || input.merchantTxnId || '')
+      .replace(/[^a-zA-Z0-9]/g, '');
+    const merchantUniqueId = (
+      rawUniqueAlpha.length >= 15
+        ? rawUniqueAlpha
+        : `${rawUniqueAlpha}${Date.now().toString(36).toUpperCase()}`
+    ).slice(0, 36);
+
+    const paymentData: Record<string, any> = {
+      totalAmount: cleanAmt,
+      txnCurrency: (input.txnCurrency || 'INR').toUpperCase(),
+    };
+
+    const billingData: Record<string, string> = {};
+    const nameParts = String(input.customerFirstName || '').trim().split(/\s+/).filter(Boolean);
+    if (nameParts[0]) {
+      billingData.firstName = nameParts[0].slice(0, 40);
+      billingData.lastName = (
+        input.customerLastName ||
+        (nameParts.length > 1 ? nameParts.slice(1).join(' ') : nameParts[0])
+      ).slice(0, 40);
+    }
+    if (input.customerEmail && input.customerEmail.includes('@')) {
+      billingData.emailId = input.customerEmail.trim().slice(0, 80);
+    }
+    const cleanPhone = String(input.customerPhone || '').replace(/\D/g, '').slice(-10);
+    if (cleanPhone.length >= 7) {
+      billingData.callingCode = '+91';
+      billingData.phoneNumber = cleanPhone;
+    }
+    if (input.billingStreet?.trim()) {
+      billingData.addressStreet1 = input.billingStreet.trim().slice(0, 80);
+    }
+    if (input.billingCity?.trim()) {
+      billingData.addressCity = input.billingCity.trim().slice(0, 40);
+    }
+    if (input.billingState?.trim()) {
+      billingData.addressState = input.billingState.trim().slice(0, 40);
+    }
+    if (input.billingPostalCode?.trim()) {
+      billingData.addressPostalCode = input.billingPostalCode.trim().slice(0, 15);
+    }
+    if (input.billingCountry?.trim()) {
+      const c = input.billingCountry.trim().toUpperCase();
+      const iso2To3: Record<string, string> = {
+        IN: 'IND',
+        US: 'USA',
+        GB: 'GBR',
+        AE: 'ARE',
+        SG: 'SGP',
+        DE: 'DEU',
+        FR: 'FRA',
+        AU: 'AUS',
+        CA: 'CAN',
+      };
+      billingData.addressCountry = c.length === 2 ? (iso2To3[c] || c) : c.slice(0, 3);
+    }
+    if (Object.keys(billingData).length > 0) {
+      paymentData.billingData = billingData;
+    }
+
     const payloadObj: Record<string, any> = {
-      merchantTxnId: String(input.merchantTxnId).trim().slice(0, 40),
-      merchantUniqueId: input.merchantUniqueId || input.merchantTxnId,
-      paymentData: {
-        totalAmount: cleanAmt,
-        txnCurrency: (input.txnCurrency || 'INR').toUpperCase(),
-      },
+      merchantTxnId: rawTxnId,
+      merchantUniqueId,
+      paymentData,
       merchantCallbackURL: input.merchantCallbackURL,
     };
 
-    if (input.customerEmail || input.customerFirstName || input.customerPhone) {
-      const nameParts = String(input.customerFirstName || 'Customer')
-        .trim()
-        .split(/\s+/);
-      payloadObj.paymentData.billingData = {
-        firstName: (nameParts[0] || 'Customer').slice(0, 40),
-        lastName: (
-          input.customerLastName ||
-          (nameParts.length > 1 ? nameParts.slice(1).join(' ') : 'User')
-        ).slice(0, 40),
-        emailId: (input.customerEmail || '').trim() || undefined,
-        callingCode: '+91',
-        phoneNumber: String(input.customerPhone || '').replace(/\D/g, '').slice(-10) || undefined,
-        ...(input.billingCountry ? { country: input.billingCountry } : {}),
-        ...(input.billingCity ? { city: input.billingCity } : {}),
-        ...(input.billingState ? { state: input.billingState } : {}),
-        ...(input.billingPostalCode ? { postalCode: input.billingPostalCode } : {}),
-        ...(input.billingStreet ? { streetName: input.billingStreet.slice(0, 80) } : {}),
-      };
-    }
-
     const plaintextJson = JSON.stringify(payloadObj);
-    const useJwe = Boolean(normalizePemString(config.payglocalPublicKeyPem || '', 'PUBLIC'));
+    const hasPublicPem = Boolean(normalizePemString(config.payglocalPublicKeyPem || '', 'PUBLIC'));
 
-    let requestBody: string;
-    let contentType: string;
-    let jweToken: string | undefined;
-
-    if (useJwe) {
-      jweToken = await this.generateJWE(plaintextJson, config);
-      requestBody = jweToken;
-      contentType = 'text/plain';
-    } else {
-      requestBody = plaintextJson;
-      contentType = 'application/json';
+    if (!hasPublicPem) {
+      throw new Error(
+        'PayGlocal Public Key (.pem) is missing. Upload the PayGlocal Public Key .pem file and Public Key ID (kid) in Admin Portal → 8. Payment Gateways.'
+      );
     }
 
-    const { jwsToken } = await this.generateJWS(requestBody, config);
+    const jweToken = await this.generateJWE(plaintextJson, config);
+    const { jwsToken } = await this.generateJWS(jweToken, config, { encryptedPayload: true });
 
     const headers: Record<string, string> = {
-      'Content-Type': contentType,
+      'Content-Type': 'text/plain',
       'x-gl-token-external': jwsToken,
       'x-gl-merchantid': config.merchantId.trim(),
       'x-gl-kid': (config.privateKeyId || config.publicKeyId || '').trim(),
@@ -264,7 +307,7 @@ export class PayGlocalAdapter {
     const res = await fetch(endpoint, {
       method: 'POST',
       headers,
-      body: requestBody,
+      body: jweToken,
     });
 
     const textBody = await res.text();
@@ -277,13 +320,17 @@ export class PayGlocalAdapter {
 
     if (!res.ok) {
       const apiErr =
+        parsed?.errors?.detailedMessage ||
+        parsed?.errors?.displayMessage ||
+        parsed?.errors?.[0]?.detailedMessage ||
         parsed?.errors?.[0]?.displayMessage ||
         parsed?.errors?.[0]?.message ||
         parsed?.message ||
         parsed?.error ||
         textBody ||
         `HTTP ${res.status}`;
-      throw new Error(`PayGlocal API (${res.status}): ${apiErr}`);
+      const reason = parsed?.reasonCode ? ` [${parsed.reasonCode}]` : '';
+      throw new Error(`PayGlocal API (${res.status}${reason}): ${apiErr}`);
     }
 
     const redirectUrl =
@@ -321,11 +368,12 @@ export class PayGlocalAdapter {
   ): Promise<Record<string, any>> {
     const statusPath = `/gl/v1/payments/${encodeURIComponent(gid)}/status`;
     const url = `${this.getBaseUrl(config.environment)}${statusPath}`;
-    const { jwsToken } = await this.generateJWS(statusPath, config);
+    const { jwsToken } = await this.generateJWS(statusPath, config, { encryptedPayload: false });
 
     const res = await fetch(url, {
       method: 'GET',
       headers: {
+        'Content-Type': 'application/json',
         'x-gl-token-external': jwsToken,
         'x-gl-merchantid': config.merchantId.trim(),
         'x-gl-kid': (config.privateKeyId || config.publicKeyId || '').trim(),
@@ -361,7 +409,7 @@ export class PayGlocalAdapter {
       return { verified: true, payload: parsed };
     }
 
-    // Without PayGlocal public key PEM, decode claims (caller should confirm via status API)
+    // Without PayGlocal public key PEM, decode claims (caller confirms via status API)
     const parts = token.split('.');
     const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
     const decoded = JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
@@ -370,8 +418,8 @@ export class PayGlocalAdapter {
 
   /**
    * Non-destructive cryptographic self-test for Admin Portal "Verify Keys".
-   * Validates Merchant Private Key (.pem) PKCS#1/PKCS#8 parsing, RS256 JWS signing,
-   * and (when PayGlocal Public Key .pem is present) RSA-OAEP-256 + A128CBC-HS256 JWE encryption.
+   * Validates Merchant Private Key (.pem), PayGlocal Public Key (.pem), Key IDs,
+   * and generates official JWE (RSA-OAEP-256 + A128CBC-HS256) + JWS (RS256) tokens.
    */
   static async verifyKeyPairConfig(config: PayGlocalConfig): Promise<{
     verified: boolean;
@@ -391,8 +439,9 @@ export class PayGlocalAdapter {
     }
 
     const { pkcs8Pem, keySizeBits: privBits } = toPkcs8PrivatePem(config.merchantPrivateKeyPem);
-    const kid = (config.privateKeyId || config.publicKeyId || '').trim();
-    if (!kid) {
+    const privKid = (config.privateKeyId || config.publicKeyId || '').trim();
+    const pubKid = (config.publicKeyId || config.privateKeyId || '').trim();
+    if (!privKid) {
       return {
         verified: false,
         message:
@@ -403,39 +452,51 @@ export class PayGlocalAdapter {
       };
     }
 
-    const samplePayload = JSON.stringify({
-      merchantTxnId: `VERIFY_${Date.now()}`,
-      paymentData: { totalAmount: '1.00', txnCurrency: 'INR' },
-      merchantCallbackURL: 'https://checkout.xperiserv.in/api/v1/callbacks/payglocal',
-    });
-
     const hasPubPem = Boolean(normalizePemString(config.payglocalPublicKeyPem || '', 'PUBLIC'));
-    if (hasPubPem) {
-      const { spkiPem, keySizeBits: pubBits } = toSpkiPublicPem(config.payglocalPublicKeyPem || '');
-      if (!pkcs8Pem || !spkiPem) {
-        throw new Error('Failed to normalize RSA PEM keys.');
-      }
-      const jweToken = await this.generateJWE(samplePayload, config);
-      const { jwsToken } = await this.generateJWS(jweToken, config);
-      const endpoint = this.getInitiatePayCollectUrl(config.environment);
+    if (!hasPubPem) {
       return {
-        verified: true,
-        message: `PayGlocal Merchant Private Key (.pem, ${privBits || 2048}-bit RSA) & PayGlocal Public Key (.pem, ${pubBits || 2048}-bit RSA) verified! Live JWE (RSA-OAEP-256 + A128CBC-HS256) + JWS (RS256) signing ready for ${endpoint}.`,
-        signaturePreview: `${jwsToken.slice(0, 36)}...`,
+        verified: false,
+        message:
+          'Merchant Private Key (.pem) parsed cleanly, but PayGlocal Public Key (.pem) is missing. Upload the PayGlocal Public Key .pem file required for JWE encryption.',
+        signaturePreview: '',
         privateKeyBits: privBits,
-        publicKeyBits: pubBits,
+        mode: 'JWS_ONLY',
+      };
+    }
+    if (!pubKid) {
+      return {
+        verified: false,
+        message:
+          'Both .pem keys parsed, but Public Key ID (kid) is empty.',
+        signaturePreview: '',
+        privateKeyBits: privBits,
         mode: 'JWE+JWS',
       };
     }
 
-    const { jwsToken } = await this.generateJWS(samplePayload, config);
+    const { spkiPem, keySizeBits: pubBits } = toSpkiPublicPem(config.payglocalPublicKeyPem || '');
+    if (!pkcs8Pem || !spkiPem) {
+      throw new Error('Failed to normalize RSA PEM keys.');
+    }
+
+    const samplePayload = JSON.stringify({
+      merchantTxnId: `VERIFY${Date.now()}`,
+      merchantUniqueId: `UNQVERIFY${Date.now()}`,
+      paymentData: { totalAmount: '1.00', txnCurrency: 'INR' },
+      merchantCallbackURL: 'https://checkout.xperiserv.in/api/v1/callbacks/payglocal',
+    });
+
+    const jweToken = await this.generateJWE(samplePayload, config);
+    const { jwsToken } = await this.generateJWS(jweToken, config, { encryptedPayload: true });
     const endpoint = this.getInitiatePayCollectUrl(config.environment);
+
     return {
       verified: true,
-      message: `Merchant Private Key (.pem, ${privBits || 2048}-bit RSA) & RS256 JWS signing verified for ${endpoint}. Note: Upload PayGlocal Public Key (.pem) if your merchant profile requires JWE encryption.`,
+      message: `PayGlocal Merchant Private Key (.pem, ${privBits || 2048}-bit RSA) & PayGlocal Public Key (.pem, ${pubBits || 2048}-bit RSA) verified! Official JWE (RSA-OAEP-256 + A128CBC-HS256, issued-by: ${config.merchantId.trim()}) & JWS (RS256) ready for ${endpoint}.`,
       signaturePreview: `${jwsToken.slice(0, 36)}...`,
       privateKeyBits: privBits,
-      mode: 'JWS_ONLY',
+      publicKeyBits: pubBits,
+      mode: 'JWE+JWS',
     };
   }
 }

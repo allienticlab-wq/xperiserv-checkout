@@ -1306,7 +1306,12 @@ export async function processCheckoutPayment(input: {
       if (!input.forceSimulate) {
         if (!pgConfig.merchantId || !pgConfig.merchantPrivateKeyPem || (!pgConfig.privateKeyId && !pgConfig.publicKeyId)) {
           throw new Error(
-            'PayGlocal Merchant ID, Key ID (x-gl-kid / kid), and Merchant Private Key (.pem) are required. Upload your .pem key files in Admin Portal → 8. Payment Gateways.'
+            'PayGlocal Merchant ID, Private Key ID (x-gl-kid), and Merchant Private Key (.pem) are required. Upload your .pem key files in Admin Portal → 8. Payment Gateways.'
+          );
+        }
+        if (!pgConfig.payglocalPublicKeyPem) {
+          throw new Error(
+            'PayGlocal Public Key (.pem) is required for JWE encryption. Upload PayGlocal Public Key .pem and Public Key ID (kid) in Admin Portal → 8. Payment Gateways.'
           );
         }
 
@@ -1319,11 +1324,19 @@ export async function processCheckoutPayment(input: {
           }
         })();
 
+        const orderBaseCurr = String(order.currency || 'INR').toUpperCase();
+        const displayCurr = String(billingParsed.displayCurrency || orderBaseCurr).toUpperCase();
+        const fxRate = Number(billingParsed.exchangeRate || 1);
+        const effectiveTotalAmount =
+          displayCurr !== orderBaseCurr && Number.isFinite(fxRate) && fxRate > 0 && fxRate !== 1
+            ? ((order.totalAmountPaise / 100) * fxRate).toFixed(2)
+            : amountRupeesStr;
+
         const initResult = await PayGlocalAdapter.initiatePayCollect(
           {
             merchantTxnId: txnid,
-            totalAmount: amountRupeesStr,
-            txnCurrency: (billingParsed.displayCurrency || order.currency || 'INR').toUpperCase(),
+            totalAmount: effectiveTotalAmount,
+            txnCurrency: displayCurr,
             merchantCallbackURL: callbackUrl,
             customerFirstName: finalCustomerName,
             customerEmail: finalCustomerEmail,

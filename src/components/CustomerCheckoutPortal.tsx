@@ -76,6 +76,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
   const [openPolicyModalId, setOpenPolicyModalId] = useState<XperiservPolicy['id'] | 'ALL' | null>(
     null
   );
+  const [externalRedirectUrl, setExternalRedirectUrl] = useState<string | null>(null);
 
   // Mandatory Xperiserv.in Policy Acceptance Checkbox
   const [acceptedTermsAndPrivacy, setAcceptedTermsAndPrivacy] = useState<boolean>(true);
@@ -556,7 +557,17 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
       } else if (data.redirectRequired && data.actionUrl && data.formFields) {
         submitPayUHostedForm(data.actionUrl, data.formFields);
       } else if (data.redirectRequired && data.redirectUrl) {
-        window.location.assign(data.redirectUrl);
+        setExternalRedirectUrl(data.redirectUrl);
+        if (window.self === window.top) {
+          window.location.assign(data.redirectUrl);
+        } else {
+          try {
+            window.top?.location.assign(data.redirectUrl);
+          } catch {
+            // Inside cross-origin iframe: show prominent top-level redirect button
+          }
+          setProcessing(false);
+        }
       } else {
         setPaymentResult(data);
         setTrackOrderIdInput(data.order?.orderNumber || order?.orderNumber || '');
@@ -618,7 +629,17 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
       } else if (data.redirectRequired && data.actionUrl && data.formFields) {
         submitPayUHostedForm(data.actionUrl, data.formFields);
       } else if (data.redirectRequired && data.redirectUrl) {
-        window.location.assign(data.redirectUrl);
+        setExternalRedirectUrl(data.redirectUrl);
+        if (window.self === window.top) {
+          window.location.assign(data.redirectUrl);
+        } else {
+          try {
+            window.top?.location.assign(data.redirectUrl);
+          } catch {
+            // Inside cross-origin iframe: show prominent top-level redirect button
+          }
+          setProcessing(false);
+        }
       } else {
         setPrivatePaymentResult(data);
         setTrackOrderIdInput(data.order?.orderNumber || '');
@@ -1178,6 +1199,27 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                             stored with order.
                           </div>
                         </div>
+
+                        {externalRedirectUrl && (
+                          <div className="bg-emerald-950/50 border border-emerald-500/50 rounded-xl p-4 space-y-2.5 text-xs">
+                            <div className="font-semibold text-emerald-300">
+                              PayGlocal Secure Checkout Session Ready
+                            </div>
+                            <p className="text-slate-300 leading-relaxed">
+                              Click below to open PayGlocal&apos;s hosted checkout page securely in
+                              the top window:
+                            </p>
+                            <a
+                              href={externalRedirectUrl}
+                              target="_top"
+                              rel="noopener noreferrer"
+                              className="w-full py-3 px-5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors"
+                            >
+                              <ExternalLink className="w-4 h-4" />
+                              <span>Proceed to PayGlocal Payment Page</span>
+                            </a>
+                          </div>
+                        )}
 
                         <button
                           type="submit"
@@ -1957,6 +1999,27 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                         compliance
                       </div>
                     </div>
+
+                    {externalRedirectUrl && (
+                      <div className="bg-emerald-950/50 border border-emerald-500/50 rounded-xl p-4 space-y-2.5 text-xs">
+                        <div className="font-semibold text-emerald-300">
+                          PayGlocal Secure Checkout Session Ready
+                        </div>
+                        <p className="text-slate-300 leading-relaxed">
+                          Click below to open PayGlocal&apos;s hosted checkout page securely in the
+                          top window:
+                        </p>
+                        <a
+                          href={externalRedirectUrl}
+                          target="_top"
+                          rel="noopener noreferrer"
+                          className="w-full py-3 px-5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors"
+                        >
+                          <ExternalLink className="w-4 h-4" />
+                          <span>Proceed to PayGlocal Payment Page</span>
+                        </a>
+                      </div>
+                    )}
 
                     <button
                       type="submit"
