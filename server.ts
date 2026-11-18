@@ -27,12 +27,19 @@ import {
   createOrderAndCheckoutSession,
   ensureSeeded,
   getPlatformSnapshot,
+  handlePayGlocalCallback,
   handlePayUCallback,
   initiateRefund,
   processCheckoutPayment,
   purgeAllTestData,
+  resolvePayGlocalCredentials,
   resolvePayUCredentials,
+  sanitizeLegacyMerchantTaxConfig,
 } from './src/db/repository.ts';
+import {
+  PayGlocalAdapter,
+  normalizePemString,
+} from './src/services/gateways/payglocal.adapter.ts';
 import { optionalAuth, AuthRequest } from './src/middleware/auth.ts';
 import { WebhookService } from './src/services/webhook.service.ts';
 import { NotificationService } from './src/services/notification.service.ts';
@@ -408,43 +415,76 @@ const COUNTRY_TO_CURRENCY: Record<string, string> = {
 };
 
 async function getMerchantTaxConfig() {
+  const defaultConfig = {
+    merchantGstin: '',
+    legalEntityName: '',
+    brandName: '',
+    panNumber: '',
+    cinNumber: '',
+    stateCode: '',
+    defaultHsnSac: '998314',
+    defaultGstPercent: 18,
+    taxBreakdownMode: 'AUTO',
+    registeredAddress: '',
+    corporateOfficeAddress: '',
+    supportEmail: '',
+    supportPhone: '',
+    websiteUrl: 'https://checkout.xperiserv.in',
+    invoicePrefix: 'INV-',
+    bankName: '',
+    bankAccountName: '',
+    bankAccountNumber: '',
+    bankIfscCode: '',
+    bankUpiId: '',
+    authorizedSignatory: '',
+    invoiceFooterNotes: '',
+    invoiceTerms: '',
+  };
   try {
     const rows = await db
       .select()
       .from(systemSettings)
       .where(eq(systemSettings.settingKey, 'merchant_tax_config'));
     if (rows[0]) {
-      return JSON.parse(rows[0].settingValueJson);
+      const cleaned = sanitizeLegacyMerchantTaxConfig(JSON.parse(rows[0].settingValueJson));
+      return { ...defaultConfig, ...cleaned };
     }
   } catch {
     // Fallback below
   }
-  return {
-    merchantGstin: '29AABCA8921K1Z5',
-    legalEntityName: 'Allientic Lab Technologies Pvt. Ltd.',
-    stateCode: '29 (Karnataka)',
-    defaultHsnSac: '998314',
-    panNumber: 'AABCA8921K',
-  };
+  return defaultConfig;
 }
+
+app.get('/api/v1/merchant-tax-config', async (_req, res) => {
+  try {
+    await ensureSeeded();
+    const merchantTaxConfig = await getMerchantTaxConfig();
+    res.json({ merchantTaxConfig });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to load business GST configuration' });
+  }
+});
 
 app.get('/api/v1/geo-currency', async (req, res) => {
   try {
+    const queryIp = String(req.query.ip || '').trim();
     const forwarded = String(req.headers['x-forwarded-for'] || '')
       .split(',')[0]
       .trim();
     const realIp =
+      queryIp ||
       String(req.headers['cf-connecting-ip'] || req.headers['x-real-ip'] || '').trim() ||
       forwarded ||
       req.socket.remoteAddress ||
       '127.0.0.1';
     const cleanIp = realIp.replace(/^::ffff:/, '');
 
+    const queryCountry = String(req.query.country || '').trim().toUpperCase();
     const headerCountry = String(
-      req.headers['cf-ipcountry'] ||
+      queryCountry ||
+        req.headers['cf-ipcountry'] ||
         req.headers['x-vercel-ip-country'] ||
         req.headers['x-appengine-country'] ||
-        req.query.country ||
         ''
     )
       .trim()
@@ -467,36 +507,38 @@ app.get('/api/v1/geo-currency', async (req, res) => {
       cleanIp.startsWith('172.') ||
       cleanIp.startsWith('169.254.');
 
-    // Attempt live IP geolocation lookup (with 1.8s timeout so checkout is never blocked)
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 1800);
-      const lookupUrl = isPrivateIp
-        ? 'https://ipwho.is/'
-        : `https://ipwho.is/${encodeURIComponent(cleanIp)}`;
-      const geoRes = await fetch(lookupUrl, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (geoRes.ok) {
-        const geoData: any = await geoRes.json();
-        if (geoData && geoData.success !== false) {
-          detectedIp = geoData.ip || detectedIp;
-          countryCode = (geoData.country_code || countryCode || 'IN').toUpperCase();
-          countryName = geoData.country || '';
-          city = geoData.city || '';
-          region = geoData.region || '';
-          isp = geoData.connection?.isp || geoData.connection?.org || isp;
+    // Attempt live IP geolocation lookup unless an explicit ?country override was supplied
+    // or a trusted edge country header is present on a private/local IP
+    const shouldLookupIp = !queryCountry && (!isPrivateIp || !countryCode);
+    if (shouldLookupIp) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 1800);
+        const lookupUrl = isPrivateIp
+          ? 'https://ipwho.is/'
+          : `https://ipwho.is/${encodeURIComponent(cleanIp)}`;
+        const geoRes = await fetch(lookupUrl, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (geoRes.ok) {
+          const geoData: any = await geoRes.json();
+          if (geoData && geoData.success !== false) {
+            detectedIp = geoData.ip || detectedIp;
+            countryCode = (geoData.country_code || countryCode || 'IN').toUpperCase();
+            countryName = geoData.country || '';
+            city = geoData.city || '';
+            region = geoData.region || '';
+            isp = geoData.connection?.isp || geoData.connection?.org || isp;
+          }
         }
+      } catch {
+        // Fallback to timezone or header heuristics
       }
-    } catch {
-      // Fallback to timezone or header heuristics
     }
 
     if (!countryCode) {
       if (tzHint.includes('Kolkata') || tzHint.includes('Calcutta')) {
         countryCode = 'IN';
         countryName = 'India';
-        city = 'Bengaluru';
-        region = 'Karnataka';
       } else if (tzHint.startsWith('America/Toronto') || tzHint.startsWith('America/Vancouver')) {
         countryCode = 'CA';
         countryName = 'Canada';
@@ -521,8 +563,6 @@ app.get('/api/v1/geo-currency', async (req, res) => {
       } else {
         countryCode = 'IN';
         countryName = 'India';
-        city = city || 'Bengaluru';
-        region = region || 'Karnataka';
       }
     }
 
@@ -549,8 +589,8 @@ app.get('/api/v1/geo-currency', async (req, res) => {
       ip: detectedIp,
       countryCode,
       countryName,
-      city: city || (countryCode === 'IN' ? 'Bengaluru' : 'Metro Hub'),
-      region: region || (countryCode === 'IN' ? 'Karnataka' : countryName),
+      city: city || '',
+      region: region || '',
       isp,
       currency: activeCurrency.code,
       symbol: activeCurrency.symbol,
@@ -562,26 +602,21 @@ app.get('/api/v1/geo-currency', async (req, res) => {
       checkedAt: new Date().toISOString(),
     });
   } catch (error: any) {
+    const fallbackTax = await getMerchantTaxConfig();
     res.json({
       ip: '127.0.0.1',
       countryCode: 'IN',
       countryName: 'India',
-      city: 'Bengaluru',
-      region: 'Karnataka',
-      isp: 'Allientic Edge',
+      city: '',
+      region: '',
+      isp: 'Direct Network',
       currency: 'INR',
       symbol: '₹',
       currencyName: 'Indian Rupee',
       rateFromInr: 1,
       currencies: CURRENCY_CATALOG,
       recommendedGateway: 'PAYU',
-      merchantTaxConfig: {
-        merchantGstin: '29AABCA8921K1Z5',
-        legalEntityName: 'Allientic Lab Technologies Pvt. Ltd.',
-        stateCode: '29 (Karnataka)',
-        defaultHsnSac: '998314',
-        panNumber: 'AABCA8921K',
-      },
+      merchantTaxConfig: fallbackTax,
     });
   }
 });
@@ -591,17 +626,97 @@ app.put('/api/v1/merchant-tax-config', optionalAuth, async (req: AuthRequest, re
     await ensureSeeded();
     const current = await getMerchantTaxConfig();
     const updated = {
-      merchantGstin: String(req.body.merchantGstin || current.merchantGstin || '29AABCA8921K1Z5')
+      merchantGstin: String(
+        req.body.merchantGstin !== undefined ? req.body.merchantGstin : current.merchantGstin
+      )
         .trim()
         .toUpperCase(),
       legalEntityName: String(
-        req.body.legalEntityName || current.legalEntityName || 'Allientic Lab Technologies Pvt. Ltd.'
+        req.body.legalEntityName !== undefined ? req.body.legalEntityName : current.legalEntityName
       ).trim(),
-      stateCode: String(req.body.stateCode || current.stateCode || '29 (Karnataka)').trim(),
-      defaultHsnSac: String(req.body.defaultHsnSac || current.defaultHsnSac || '998314').trim(),
-      panNumber: String(req.body.panNumber || current.panNumber || 'AABCA8921K')
+      brandName: String(
+        req.body.brandName !== undefined ? req.body.brandName : current.brandName
+      ).trim(),
+      panNumber: String(
+        req.body.panNumber !== undefined ? req.body.panNumber : current.panNumber
+      )
         .trim()
         .toUpperCase(),
+      cinNumber: String(
+        req.body.cinNumber !== undefined ? req.body.cinNumber : current.cinNumber
+      )
+        .trim()
+        .toUpperCase(),
+      stateCode: String(
+        req.body.stateCode !== undefined ? req.body.stateCode : current.stateCode
+      ).trim(),
+      defaultHsnSac: String(
+        req.body.defaultHsnSac !== undefined ? req.body.defaultHsnSac : current.defaultHsnSac
+      ).trim(),
+      defaultGstPercent: Number(
+        req.body.defaultGstPercent !== undefined
+          ? req.body.defaultGstPercent
+          : current.defaultGstPercent ?? 18
+      ),
+      taxBreakdownMode: String(
+        req.body.taxBreakdownMode !== undefined
+          ? req.body.taxBreakdownMode
+          : current.taxBreakdownMode || 'AUTO'
+      ).trim(),
+      registeredAddress: String(
+        req.body.registeredAddress !== undefined
+          ? req.body.registeredAddress
+          : current.registeredAddress
+      ).trim(),
+      corporateOfficeAddress: String(
+        req.body.corporateOfficeAddress !== undefined
+          ? req.body.corporateOfficeAddress
+          : current.corporateOfficeAddress
+      ).trim(),
+      supportEmail: String(
+        req.body.supportEmail !== undefined ? req.body.supportEmail : current.supportEmail
+      ).trim(),
+      supportPhone: String(
+        req.body.supportPhone !== undefined ? req.body.supportPhone : current.supportPhone
+      ).trim(),
+      websiteUrl: String(
+        req.body.websiteUrl !== undefined ? req.body.websiteUrl : current.websiteUrl
+      ).trim(),
+      invoicePrefix: String(
+        req.body.invoicePrefix !== undefined ? req.body.invoicePrefix : current.invoicePrefix
+      ).trim(),
+      bankName: String(
+        req.body.bankName !== undefined ? req.body.bankName : current.bankName
+      ).trim(),
+      bankAccountName: String(
+        req.body.bankAccountName !== undefined ? req.body.bankAccountName : current.bankAccountName
+      ).trim(),
+      bankAccountNumber: String(
+        req.body.bankAccountNumber !== undefined
+          ? req.body.bankAccountNumber
+          : current.bankAccountNumber
+      ).trim(),
+      bankIfscCode: String(
+        req.body.bankIfscCode !== undefined ? req.body.bankIfscCode : current.bankIfscCode
+      )
+        .trim()
+        .toUpperCase(),
+      bankUpiId: String(
+        req.body.bankUpiId !== undefined ? req.body.bankUpiId : current.bankUpiId
+      ).trim(),
+      authorizedSignatory: String(
+        req.body.authorizedSignatory !== undefined
+          ? req.body.authorizedSignatory
+          : current.authorizedSignatory
+      ).trim(),
+      invoiceFooterNotes: String(
+        req.body.invoiceFooterNotes !== undefined
+          ? req.body.invoiceFooterNotes
+          : current.invoiceFooterNotes
+      ).trim(),
+      invoiceTerms: String(
+        req.body.invoiceTerms !== undefined ? req.body.invoiceTerms : current.invoiceTerms
+      ).trim(),
       updatedAt: new Date().toISOString(),
     };
 
@@ -620,9 +735,81 @@ app.put('/api/v1/merchant-tax-config', optionalAuth, async (req: AuthRequest, re
         settingValueJson: JSON.stringify(updated),
       });
     }
+
+    // Also sync platform_config companyName & productName if present
+    try {
+      const platRows = await db
+        .select()
+        .from(systemSettings)
+        .where(eq(systemSettings.settingKey, 'platform_config'));
+      if (platRows[0]) {
+        const parsedPlat = JSON.parse(platRows[0].settingValueJson || '{}');
+        const nextPlat = {
+          ...parsedPlat,
+          companyName: updated.legalEntityName || parsedPlat.companyName,
+          productName: updated.brandName || parsedPlat.productName,
+          supportEmail: updated.supportEmail || parsedPlat.supportEmail,
+          merchantGstin: updated.merchantGstin,
+        };
+        await db
+          .update(systemSettings)
+          .set({ settingValueJson: JSON.stringify(nextPlat), updatedAt: new Date() })
+          .where(eq(systemSettings.id, platRows[0].id));
+      }
+    } catch {
+      // ignore optional sync error
+    }
+
+    // Optionally propagate updated Business GST & Invoice info to existing orders
+    if (req.body.syncExistingInvoices !== false) {
+      try {
+        const allOrdersList = await db.select().from(orders);
+        for (const ord of allOrdersList) {
+          let bObj: Record<string, any> = {};
+          try {
+            bObj = JSON.parse(ord.billingAddress || '{}');
+            if (!bObj || typeof bObj !== 'object') bObj = { line1: ord.billingAddress || '' };
+          } catch {
+            bObj = { line1: ord.billingAddress || '' };
+          }
+          bObj.merchantGstin = updated.merchantGstin;
+          bObj.merchantLegalName = updated.legalEntityName;
+          bObj.merchantBrandName = updated.brandName;
+          bObj.merchantPan = updated.panNumber;
+          bObj.merchantCin = updated.cinNumber;
+          bObj.merchantStateCode = updated.stateCode;
+          bObj.merchantAddress = updated.registeredAddress;
+          bObj.merchantEmail = updated.supportEmail;
+          bObj.merchantPhone = updated.supportPhone;
+          bObj.hsnSacCode = bObj.hsnSacCode || updated.defaultHsnSac;
+          await db
+            .update(orders)
+            .set({ billingAddress: JSON.stringify(bObj), updatedAt: new Date() })
+            .where(eq(orders.id, ord.id));
+        }
+      } catch {
+        // non-blocking
+      }
+    }
+
+    await db.insert(auditLogs).values({
+      actorEmail: req.dbUser?.email || 'admin@xperiserv.in',
+      actorRole: 'Super Administrator',
+      action: 'BUSINESS_GST_AND_INVOICE_CONFIG_UPDATED',
+      resourceType: 'system_settings',
+      resourceId: 'merchant_tax_config',
+      severity: 'INFO',
+      detailsJson: JSON.stringify({
+        merchantGstin: updated.merchantGstin,
+        legalEntityName: updated.legalEntityName,
+        stateCode: updated.stateCode,
+        invoicePrefix: updated.invoicePrefix,
+      }),
+    });
+
     res.json({ saved: true, merchantTaxConfig: updated });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Failed to update Merchant GSTIN config' });
+    res.status(500).json({ error: error.message || 'Failed to update Business GST & Invoice config' });
   }
 });
 
@@ -653,6 +840,18 @@ app.patch('/api/v1/orders/:id', optionalAuth, async (req: AuthRequest, res) => {
       internalNotes,
       shippingTrackingNumber,
       estimatedDeliveryDate,
+      merchantGstin,
+      merchantLegalName,
+      merchantPan,
+      merchantCin,
+      merchantStateCode,
+      merchantAddress,
+      merchantEmail,
+      merchantPhone,
+      hsnSacCode,
+      invoiceNotes,
+      invoiceTerms,
+      taxBreakdownMode,
     } = req.body;
     const found = await db.select().from(orders).where(eq(orders.id, orderId));
     if (!found[0]) {
@@ -694,6 +893,42 @@ app.patch('/api/v1/orders/:id', optionalAuth, async (req: AuthRequest, res) => {
     }
     if (currency !== undefined) {
       billingObj.displayCurrency = String(currency).trim().toUpperCase();
+    }
+    if (merchantGstin !== undefined) {
+      billingObj.merchantGstin = String(merchantGstin).trim().toUpperCase();
+    }
+    if (merchantLegalName !== undefined) {
+      billingObj.merchantLegalName = String(merchantLegalName).trim();
+    }
+    if (merchantPan !== undefined) {
+      billingObj.merchantPan = String(merchantPan).trim().toUpperCase();
+    }
+    if (merchantCin !== undefined) {
+      billingObj.merchantCin = String(merchantCin).trim().toUpperCase();
+    }
+    if (merchantStateCode !== undefined) {
+      billingObj.merchantStateCode = String(merchantStateCode).trim();
+    }
+    if (merchantAddress !== undefined) {
+      billingObj.merchantAddress = String(merchantAddress).trim();
+    }
+    if (merchantEmail !== undefined) {
+      billingObj.merchantEmail = String(merchantEmail).trim();
+    }
+    if (merchantPhone !== undefined) {
+      billingObj.merchantPhone = String(merchantPhone).trim();
+    }
+    if (hsnSacCode !== undefined) {
+      billingObj.hsnSacCode = String(hsnSacCode).trim();
+    }
+    if (invoiceNotes !== undefined) {
+      billingObj.invoiceNotes = String(invoiceNotes).trim();
+    }
+    if (invoiceTerms !== undefined) {
+      billingObj.invoiceTerms = String(invoiceTerms).trim();
+    }
+    if (taxBreakdownMode !== undefined) {
+      billingObj.taxBreakdownMode = String(taxBreakdownMode).trim();
     }
 
     const nextBillingJson = JSON.stringify(billingObj);
@@ -960,7 +1195,7 @@ app.post('/api/v1/orders/track/request-otp', async (req, res) => {
     );
     if (!order) {
       return res.status(404).json({
-        error: `No order found matching Order ID "${orderId}". Try ALT-ORD-2026-1001, ALT-ORD-2026-1002, or ALT-ORD-2026-1003.`,
+        error: `No order found matching Order ID "${orderId}".`,
       });
     }
 
@@ -1044,7 +1279,7 @@ app.get('/api/v1/orders/track/:orderId', async (req, res) => {
     );
     if (!order) {
       return res.status(404).json({
-        error: `No order found matching Order ID "${req.params.orderId}". Try ALT-ORD-2026-1001, ALT-ORD-2026-1002, or ALT-ORD-2026-1003.`,
+        error: `No order found matching Order ID "${req.params.orderId}".`,
       });
     }
     const orderPayments = (await db.select().from(payments)).filter(
@@ -1099,9 +1334,9 @@ app.post('/api/v1/checkout/activate-product', async (req, res) => {
 
     const qty = Math.max(1, Number(quantity || 1));
     const result = await createOrderAndCheckoutSession({
-      customerName: customerName || 'Guest Customer',
-      customerEmail: customerEmail || 'guest.customer@xperiserv.in',
-      customerMobile: customerMobile || '+91 98000 00000',
+      customerName: customerName || 'Customer',
+      customerEmail: customerEmail || 'customer@example.com',
+      customerMobile: customerMobile || '+91 99999 99999',
       customReference: `PRD-${product.sku}`,
       selectedGateway: selectedGateway || 'PAYU',
       shippingChargesPaise: product.shippingChargesPaise || 0,
@@ -1355,9 +1590,9 @@ app.post('/api/v1/pay/:token/checkout', async (req, res) => {
 
     // Server-side authoritative order creation restricted strictly to link.productId
     const created = await createOrderAndCheckoutSession({
-      customerName: customerName || 'Enterprise Client',
-      customerEmail: customerEmail || 'client@xperiserv.in',
-      customerMobile: customerMobile || '+91 98450 11209',
+      customerName: customerName || 'Customer',
+      customerEmail: customerEmail || 'customer@example.com',
+      customerMobile: customerMobile || '+91 99999 99999',
       gstin: customerGstin,
       companyName,
       billingAddress,
@@ -1751,6 +1986,32 @@ app.post('/api/v1/callbacks/payu', payuCallbackHandler);
 app.get('/api/v1/callbacks/payu', payuCallbackHandler);
 app.post('/api/v1/webhooks/payu', payuCallbackHandler);
 
+// Official PayGlocal PayCollect Callback & Webhook Handler (x-gl-token JWT)
+const payglocalCallbackHandler = async (req: express.Request, res: express.Response) => {
+  try {
+    const payload = { ...(req.query || {}), ...(req.body || {}) };
+    const result = await handlePayGlocalCallback(payload, req.headers as Record<string, any>);
+    const wantsJson =
+      req.headers.accept &&
+      req.headers.accept.includes('application/json') &&
+      !req.headers.accept.includes('text/html');
+    if (wantsJson) {
+      return res.json(result);
+    }
+    return res.redirect(303, result.redirectPath);
+  } catch (error: any) {
+    console.error('PayGlocal callback error:', error);
+    return res.redirect(
+      303,
+      `/?payglocal_status=failure&payglocal_error=${encodeURIComponent(error.message || 'PayGlocal callback verification failed')}`
+    );
+  }
+};
+
+app.post('/api/v1/callbacks/payglocal', payglocalCallbackHandler);
+app.get('/api/v1/callbacks/payglocal', payglocalCallbackHandler);
+app.post('/api/v1/webhooks/payglocal', payglocalCallbackHandler);
+
 // Fetch Verified Payment + Order + Session by Transaction ID (for post-redirect receipt display)
 app.get('/api/v1/payments/by-txnid/:txnid', async (req, res) => {
   try {
@@ -1924,6 +2185,9 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
       publicKeyOrClientId,
       secretOrSalt,
       webhookSecret,
+      privateKeyId,
+      publicKeyId,
+      payglocalPublicKeyPem,
       minTransactionPaise,
       maxTransactionPaise,
       supportedCurrencies,
@@ -1958,13 +2222,18 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
       publicKeyOrClientId !== undefined
         ? String(publicKeyOrClientId).replace(/['"\r\n\t|]/g, '').trim()
         : existing[0].publicKeyOrClientId || '';
-    let cleanIncomingSecret =
-      secretOrSalt !== undefined && !String(secretOrSalt).includes('••')
-        ? String(secretOrSalt)
-            .replace(/^enc_aes256_/, '')
-            .replace(/['"\r\n\t|]/g, '')
-            .trim()
-        : undefined;
+
+    let cleanIncomingSecret: string | undefined;
+    if (secretOrSalt !== undefined && !String(secretOrSalt).includes('••')) {
+      if (code === 'PAYGLOCAL') {
+        cleanIncomingSecret = normalizePemString(String(secretOrSalt), 'PRIVATE');
+      } else {
+        cleanIncomingSecret = String(secretOrSalt)
+          .replace(/^enc_aes256_/, '')
+          .replace(/['"\r\n\t|]/g, '')
+          .trim();
+      }
+    }
 
     // Smart auto-correction for PayU if user pasted Key into Merchant ID and Salt into Merchant Key
     if (
@@ -1994,6 +2263,31 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
           : existing[0].webhookSecret
         : existing[0].webhookSecret;
 
+    let existingRuleObj: Record<string, any> = {};
+    try {
+      existingRuleObj = JSON.parse(existing[0].routingRuleJson || '{}') || {};
+    } catch {
+      existingRuleObj = {};
+    }
+
+    if (code === 'PAYGLOCAL') {
+      if (privateKeyId !== undefined) {
+        existingRuleObj.privateKeyId = String(privateKeyId).trim();
+      }
+      if (publicKeyId !== undefined) {
+        existingRuleObj.publicKeyId = String(publicKeyId).trim();
+      }
+      if (payglocalPublicKeyPem !== undefined) {
+        const cleanedPubPem = String(payglocalPublicKeyPem).trim()
+          ? normalizePemString(String(payglocalPublicKeyPem), 'PUBLIC')
+          : '';
+        existingRuleObj.payglocalPublicKeyPem = cleanedPubPem;
+      }
+      if (!cleanKey && (existingRuleObj.publicKeyId || existingRuleObj.privateKeyId)) {
+        cleanKey = String(existingRuleObj.publicKeyId || existingRuleObj.privateKeyId).trim();
+      }
+    }
+
     const updated = await db
       .update(paymentGateways)
       .set({
@@ -2004,6 +2298,7 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
         publicKeyOrClientId: cleanKey,
         encryptedSecretOrSalt: nextSecret,
         webhookSecret: nextWebhookSecret,
+        routingRuleJson: JSON.stringify(existingRuleObj),
         minTransactionPaise:
           minTransactionPaise !== undefined
             ? Number(minTransactionPaise)
@@ -2029,6 +2324,7 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
     const rawUpdatedSecret = (updated[0].encryptedSecretOrSalt || '')
       .replace(/^enc_aes256_/, '')
       .trim();
+    const updatedPubPem = String(existingRuleObj.payglocalPublicKeyPem || '').trim();
 
     await db.insert(auditLogs).values({
       actorEmail: req.dbUser?.email || 'admin@xperiserv.in',
@@ -2045,6 +2341,7 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
         merchantId: updated[0].merchantId,
         publicKeyOrClientId: updated[0].publicKeyOrClientId,
         hasSecretConfigured: Boolean(rawUpdatedSecret.length > 0),
+        hasPayGlocalPublicKeyPem: Boolean(updatedPubPem.length > 0),
         hasWebhookSecretConfigured: Boolean(
           updated[0].webhookSecret && updated[0].webhookSecret.length > 0
         ),
@@ -2056,6 +2353,10 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
         ...updated[0],
         secretOrSalt: rawUpdatedSecret,
         webhookSecret: updated[0].webhookSecret || '',
+        privateKeyId: String(existingRuleObj.privateKeyId || updated[0].publicKeyOrClientId || '').trim(),
+        publicKeyId: String(existingRuleObj.publicKeyId || updated[0].publicKeyOrClientId || '').trim(),
+        payglocalPublicKeyPem: updatedPubPem,
+        hasPayGlocalPublicKeyPem: Boolean(updatedPubPem.length > 0),
         hasSecretConfigured: Boolean(rawUpdatedSecret.length > 0),
         hasWebhookSecretConfigured: Boolean(
           updated[0].webhookSecret && updated[0].webhookSecret.length > 0
@@ -2167,20 +2468,17 @@ app.post('/api/v1/gateways/:code/verify', optionalAuth, async (req: AuthRequest,
         liveApiMessage = 'Missing PayPal Client ID or PayPal Client Secret.';
       }
     } else if (code === 'PAYGLOCAL') {
-      verified = hasMerchantId && hasPublicKey && hasSecret;
-      signaturePreview =
-        crypto
-          .createHmac('sha256', rawSecret || 'MISSING_PRIVATE_KEY')
-          .update(`${gw.merchantId || 'PAYGLOCAL'}|${gw.publicKeyOrClientId || 'KID'}|100.00|INR`)
-          .digest('hex')
-          .slice(0, 32) + '...';
-      const apiBase =
-        gw.environment === 'PRODUCTION'
-          ? 'https://api.prod.payglocal.in/gl/v1/payments/initiate/paycollect'
-          : 'https://api.uat.payglocal.in/gl/v1/payments/initiate/paycollect';
-      liveApiMessage = verified
-        ? `PayGlocal Merchant (${gw.merchantId}), Public Key ID (${gw.publicKeyOrClientId}) & JWE/JWS Signing Secret verified for ${apiBase} (${gw.environment}).`
-        : 'Missing PayGlocal Merchant ID, Public Key ID (kid), or Private Key / Signing Secret.';
+      const pgConfig = resolvePayGlocalCredentials(gw);
+      try {
+        const keyCheck = await PayGlocalAdapter.verifyKeyPairConfig(pgConfig);
+        verified = keyCheck.verified;
+        signaturePreview = keyCheck.signaturePreview;
+        liveApiMessage = keyCheck.message;
+      } catch (err: any) {
+        verified = false;
+        signaturePreview = '';
+        liveApiMessage = `PayGlocal PEM / JWE+JWS verification failed: ${err.message || 'Invalid .pem key format'}`;
+      }
     }
 
     await db
@@ -2888,7 +3186,7 @@ app.post('/api/v1/webhooks/test', optionalAuth, async (req, res) => {
     const eventType = req.body.eventType || 'payment.success';
     const deliveries = await WebhookService.dispatchEvent(eventType, {
       testEvent: true,
-      orderNumber: 'ALT-ORD-2026-1001',
+      orderNumber: `ORD-TEST-${new Date().getFullYear()}`,
       transactionId: `TXN-TEST-${Date.now().toString(36).toUpperCase()}`,
       amountPaise: 4500000,
       currency: 'INR',

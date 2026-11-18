@@ -16,11 +16,13 @@ import {
   AlertTriangle,
   Truck,
   ExternalLink,
+  Globe,
 } from 'lucide-react';
 import {
   XperiservPolicyFooter,
   XperiservPolicyModal,
 } from './XperiservPolicyFooter.tsx';
+import { InvoicePreviewModal } from './AdminModals.tsx';
 import {
   XPERISERV_POLICIES,
   XPERISERV_POLICY_VERSION,
@@ -131,6 +133,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     }
   });
   const [shippingAddressText, setShippingAddressText] = useState<string>('');
+  const [customerInvoiceOrder, setCustomerInvoiceOrder] = useState<any | null>(null);
 
   // IP & Location-Based Multi-Currency + Merchant GSTIN State
   const DEFAULT_CURRENCIES: Record<
@@ -165,21 +168,21 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
       panNumber: string;
     };
   }>({
-    ip: 'Detecting IP...',
+    ip: '',
     countryCode: 'IN',
     countryName: 'India',
-    city: 'Bengaluru',
-    region: 'Karnataka',
-    isp: 'Cloud Edge',
+    city: '',
+    region: '',
+    isp: '',
     currency: 'INR',
     symbol: '₹',
     currencies: DEFAULT_CURRENCIES,
     merchantTaxConfig: {
-      merchantGstin: '29AABCA8921K1Z5',
-      legalEntityName: 'Allientic Lab Technologies Pvt. Ltd.',
-      stateCode: '29 (Karnataka)',
+      merchantGstin: '',
+      legalEntityName: '',
+      stateCode: '',
       defaultHsnSac: '998314',
-      panNumber: 'AABCA8921K',
+      panNumber: '',
     },
   });
   const [selectedCurrency, setSelectedCurrency] = useState<string>('INR');
@@ -385,9 +388,9 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
           productId: product.id,
           sku: product.sku,
           quantity: 1,
-          customerName: customerName || 'Guest Customer',
-          customerEmail: customerEmail || 'customer@xperiserv.in',
-          customerMobile: customerMobile || '+91 98450 11209',
+          customerName: customerName || 'Customer',
+          customerEmail: customerEmail || 'customer@example.com',
+          customerMobile: customerMobile || '+91 99999 99999',
           selectedGateway: selectedGatewayCode,
         }),
       });
@@ -458,19 +461,24 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     form.submit();
   };
 
-  // Detect return from PayU Hosted Checkout Callback (?payu_txnid=...&payu_status=...)
+  // Detect return from PayU or PayGlocal Hosted Checkout Callback
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const payuTxnid = (params.get('payu_txnid') || '').trim();
     const payuError = (params.get('payu_error') || '').trim();
+    const payglocalTxnid = (params.get('payglocal_txnid') || '').trim();
+    const payglocalError = (params.get('payglocal_error') || '').trim();
 
     if (payuError) {
       setErrorMessage(payuError);
+    } else if (payglocalError) {
+      setErrorMessage(payglocalError);
     }
 
-    if (!payuTxnid) return;
+    const callbackTxnid = payuTxnid || payglocalTxnid;
+    if (!callbackTxnid) return;
 
-    fetch(`/api/v1/payments/by-txnid/${encodeURIComponent(payuTxnid)}`)
+    fetch(`/api/v1/payments/by-txnid/${encodeURIComponent(callbackTxnid)}`)
       .then((res) => res.json())
       .then(async (data) => {
         if (!data?.payment) return;
@@ -487,7 +495,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
         } else if (data.payment.status === 'Failed') {
           setErrorMessage(
             data.payment.errorMessage ||
-              'PayU payment was cancelled or declined. No amount was captured.'
+              'Payment was cancelled or declined by gateway. No amount was captured.'
           );
         }
       })
@@ -508,12 +516,11 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     setErrorMessage(null);
 
     const serializedBillingPayload = JSON.stringify({
-      line1: billingAddressText || 'Enterprise Billing Desk',
+      line1: billingAddressText || '',
       gstin: customerGstin.trim().toUpperCase() || undefined,
       companyName: companyName.trim() || undefined,
-      merchantGstin: geoInfo.merchantTaxConfig?.merchantGstin || '29AABCA8921K1Z5',
-      detectedIp: geoInfo.ip,
-      detectedCountry: geoInfo.countryName,
+      merchantGstin: geoInfo.merchantTaxConfig?.merchantGstin || undefined,
+      detectedCountry: geoInfo.countryCode || undefined,
       displayCurrency: selectedCurrency,
       exchangeRate: activeCurrencyMeta.rateFromInr,
     });
@@ -547,8 +554,9 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
         setErrorMessage(data.error || 'Payment initiation failed');
         setProcessing(false);
       } else if (data.redirectRequired && data.actionUrl && data.formFields) {
-        // Redirect browser to real PayU Hosted Checkout (https://secure.payu.in/_payment)
         submitPayUHostedForm(data.actionUrl, data.formFields);
+      } else if (data.redirectRequired && data.redirectUrl) {
+        window.location.assign(data.redirectUrl);
       } else {
         setPaymentResult(data);
         setTrackOrderIdInput(data.order?.orderNumber || order?.orderNumber || '');
@@ -575,12 +583,11 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     setErrorMessage(null);
 
     const serializedPrivateBillingPayload = JSON.stringify({
-      line1: billingAddressText || 'Enterprise Billing Desk',
+      line1: billingAddressText || '',
       gstin: customerGstin.trim().toUpperCase() || undefined,
       companyName: companyName.trim() || undefined,
-      merchantGstin: geoInfo.merchantTaxConfig?.merchantGstin || '29AABCA8921K1Z5',
-      detectedIp: geoInfo.ip,
-      detectedCountry: geoInfo.countryName,
+      merchantGstin: geoInfo.merchantTaxConfig?.merchantGstin || undefined,
+      detectedCountry: geoInfo.countryCode || undefined,
       displayCurrency: selectedCurrency,
       exchangeRate: activeCurrencyMeta.rateFromInr,
     });
@@ -609,8 +616,9 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
         setErrorMessage(data.error || 'Private purchase link payment initiation failed');
         setProcessing(false);
       } else if (data.redirectRequired && data.actionUrl && data.formFields) {
-        // Redirect browser to real PayU Hosted Checkout (https://secure.payu.in/_payment)
         submitPayUHostedForm(data.actionUrl, data.formFields);
+      } else if (data.redirectRequired && data.redirectUrl) {
+        window.location.assign(data.redirectUrl);
       } else {
         setPrivatePaymentResult(data);
         setTrackOrderIdInput(data.order?.orderNumber || '');
@@ -646,7 +654,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
               {brandSettings?.companyName || 'Allientic Lab Technologies'}
             </span>
             <span className="text-[11px] font-mono text-slate-400 block">
-              checkout.xperiserv.in · GSTIN: {geoInfo.merchantTaxConfig?.merchantGstin || '29AABCA8921K1Z5'}
+              checkout.xperiserv.in
             </span>
           </div>
         </div>
@@ -685,7 +693,22 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
           </button>
         </nav>
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-2.5 shrink-0">
+          <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs">
+            <Globe className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            <select
+              aria-label="Display Currency"
+              value={selectedCurrency}
+              onChange={(e) => setSelectedCurrency(e.target.value)}
+              className="bg-transparent text-slate-100 font-mono focus:outline-none cursor-pointer"
+            >
+              {Object.values(geoInfo.currencies || DEFAULT_CURRENCIES).map((c: any) => (
+                <option key={c.code} value={c.code} className="bg-slate-900 text-slate-100">
+                  {c.code} ({c.symbol})
+                </option>
+              ))}
+            </select>
+          </div>
           <button
             onClick={onBackToAdmin}
             className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-200 bg-slate-800 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0"
@@ -906,8 +929,8 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                             </button>
                             <button
                               type="button"
-                              onClick={() => window.print()}
-                              className="px-3 py-2 text-xs font-medium bg-slate-800 text-slate-200 rounded-lg border border-slate-700"
+                              onClick={() => setCustomerInvoiceOrder(privatePaymentResult.order)}
+                              className="px-3 py-2 text-xs font-medium bg-slate-800 text-slate-200 rounded-lg border border-slate-700 hover:bg-slate-700"
                             >
                               Download GST Invoice
                             </button>
@@ -999,7 +1022,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                               maxLength={15}
                               value={customerGstin}
                               onChange={(e) => setCustomerGstin(e.target.value.toUpperCase())}
-                              placeholder="29ABCDE1234F1Z5"
+                              placeholder="15-character GSTIN"
                               className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 uppercase"
                             />
                           </div>
@@ -1011,7 +1034,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                               type="text"
                               value={companyName}
                               onChange={(e) => setCompanyName(e.target.value)}
-                              placeholder="Enterprise Pvt. Ltd."
+                              placeholder="Company or Organization"
                               className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-100"
                             />
                           </div>
@@ -1023,7 +1046,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                               type="text"
                               value={couponInput}
                               onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
-                              placeholder="ALLIENTIC10"
+                              placeholder="Enter promo code"
                               className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
                             />
                           </div>
@@ -1216,7 +1239,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                   required
                   value={trackOrderIdInput}
                   onChange={(e) => setTrackOrderIdInput(e.target.value.toUpperCase())}
-                  placeholder="Order ID (e.g. ALT-ORD-2026-1001)"
+                  placeholder="Enter your Order ID or Invoice Number"
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-10 pr-3 py-2.5 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
                 />
               </div>
@@ -1239,23 +1262,6 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                 </button>
               </div>
             </form>
-
-            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
-              <span>Sample Order IDs:</span>
-              {['ALT-ORD-2026-1001', 'ALT-ORD-2026-1002', 'ALT-ORD-2026-1003'].map((sampleId) => (
-                <button
-                  key={sampleId}
-                  type="button"
-                  onClick={() => {
-                    setTrackOrderIdInput(sampleId);
-                    handleTrackOrder(undefined, sampleId);
-                  }}
-                  className="font-mono text-emerald-400 hover:underline"
-                >
-                  {sampleId}
-                </button>
-              ))}
-            </div>
           </div>
 
           {trackingError && (
@@ -1303,7 +1309,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                     )}
                   <button
                     type="button"
-                    onClick={() => window.print()}
+                    onClick={() => setCustomerInvoiceOrder(trackedData.order)}
                     className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg border border-slate-700"
                   >
                     <FileText className="w-3.5 h-3.5" />
@@ -1537,7 +1543,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                     {formatINR(order.totalAmountPaise)}
                   </div>
                   <p className="text-xs text-slate-400">
-                    Includes 18% GST · Currency: {order.currency}
+                    Includes 18% GST · Display Currency: {selectedCurrency} (Settled in {order.currency})
                   </p>
                 </div>
 
@@ -1575,7 +1581,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                         type="text"
                         value={couponInput}
                         onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
-                        placeholder="ALLIENTIC10 or XPERISERV2500"
+                        placeholder="Enter promo code"
                         className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
                       />
                       <button
@@ -1683,7 +1689,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                               </button>
                               <button
                                 type="button"
-                                onClick={() => window.print()}
+                                onClick={() => setCustomerInvoiceOrder(order)}
                                 className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium bg-slate-800 text-slate-200 border border-slate-700 rounded-lg hover:bg-slate-700 whitespace-nowrap"
                               >
                                 <FileText className="w-3.5 h-3.5" />
@@ -1819,7 +1825,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                             maxLength={15}
                             value={customerGstin}
                             onChange={(e) => setCustomerGstin(e.target.value.toUpperCase())}
-                            placeholder="29ABCDE1234F1Z5"
+                            placeholder="15-character GSTIN"
                             className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-slate-100 uppercase focus:outline-none focus:border-emerald-500"
                           />
                         </div>
@@ -1831,7 +1837,7 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                             type="text"
                             value={companyName}
                             onChange={(e) => setCompanyName(e.target.value)}
-                            placeholder="Enterprise Pvt. Ltd."
+                            placeholder="Company or Organization"
                             className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
                           />
                         </div>
@@ -1989,6 +1995,14 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
           policies={livePolicies}
           version={livePolicyVersion}
           onClose={() => setOpenPolicyModalId(null)}
+        />
+      )}
+
+      {customerInvoiceOrder && (
+        <InvoicePreviewModal
+          order={customerInvoiceOrder}
+          merchantTaxConfig={geoInfo.merchantTaxConfig}
+          onClose={() => setCustomerInvoiceOrder(null)}
         />
       )}
     </div>

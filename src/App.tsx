@@ -19,6 +19,7 @@ import {
   XperiservPolicyModal,
 } from './components/XperiservPolicyFooter.tsx';
 import { MerchantPolicyEditor } from './components/MerchantPolicyEditor.tsx';
+import { BusinessGstInvoiceEditor } from './components/BusinessGstInvoiceEditor.tsx';
 import {
   XPERISERV_POLICIES,
   XPERISERV_POLICY_VERSION,
@@ -58,6 +59,7 @@ import {
   Link2,
   Trash2,
   ArrowLeft,
+  Upload,
 } from 'lucide-react';
 
 type AdminSection =
@@ -66,6 +68,7 @@ type AdminSection =
   | 'private-products'
   | 'payment-links'
   | 'orders'
+  | 'business-gst'
   | 'payments'
   | 'refunds'
   | 'gateways'
@@ -88,6 +91,7 @@ const SIDEBAR_ITEMS: Array<{ id: AdminSection; label: string; icon: React.Compon
   { id: 'private-products', label: '3. Private Products', icon: Lock },
   { id: 'payment-links', label: '4. Payment Links', icon: Link2 },
   { id: 'orders', label: '5. Orders', icon: ShoppingBag },
+  { id: 'business-gst', label: 'Business Info & GST', icon: FileText },
   { id: 'payments', label: '6. Transactions', icon: CreditCard },
   { id: 'refunds', label: '7. Refunds', icon: RotateCcw },
   { id: 'gateways', label: '8. Payment Gateways', icon: Sliders },
@@ -305,7 +309,7 @@ export default function App() {
     detail: string;
   }> | null>(null);
 
-  // Payment Gateway Credential Editing & Verification State (PayU, Zoho Payments, PayPal)
+  // Payment Gateway Credential Editing & Verification State (PayU, Zoho Payments, PayPal, PayGlocal)
   const [gatewayEdits, setGatewayEdits] = useState<
     Record<
       string,
@@ -315,6 +319,9 @@ export default function App() {
         publicKeyOrClientId: string;
         secretOrSalt: string;
         webhookSecret: string;
+        privateKeyId: string;
+        publicKeyId: string;
+        payglocalPublicKeyPem: string;
         supportedCurrencies: string;
         supportedMethods: string;
       }
@@ -436,6 +443,16 @@ export default function App() {
                 gw.webhookSecret !== undefined
                   ? gw.webhookSecret
                   : prev[gw.code]?.webhookSecret || '',
+              privateKeyId: gw.privateKeyId || prev[gw.code]?.privateKeyId || '',
+              publicKeyId:
+                gw.publicKeyId ||
+                gw.publicKeyOrClientId ||
+                prev[gw.code]?.publicKeyId ||
+                '',
+              payglocalPublicKeyPem:
+                gw.payglocalPublicKeyPem !== undefined
+                  ? gw.payglocalPublicKeyPem
+                  : prev[gw.code]?.payglocalPublicKeyPem || '',
               supportedCurrencies: gw.supportedCurrencies || 'INR',
               supportedMethods: gw.supportedMethods || 'UPI,CARD,NETBANKING',
             };
@@ -814,17 +831,27 @@ export default function App() {
       publicKeyOrClientId: gw.publicKeyOrClientId || '',
       secretOrSalt: gw.secretOrSalt || '',
       webhookSecret: gw.webhookSecret || '',
+      privateKeyId: gw.privateKeyId || '',
+      publicKeyId: gw.publicKeyId || '',
+      payglocalPublicKeyPem: gw.payglocalPublicKeyPem || '',
       supportedCurrencies: gw.supportedCurrencies || 'INR',
       supportedMethods: gw.supportedMethods || 'UPI,CARD',
     };
     setSavingGatewayCode(gw.code);
     try {
+      const effectivePublicKeyOrClientId =
+        gw.code === 'PAYGLOCAL'
+          ? (draft.publicKeyId || draft.publicKeyOrClientId || '').trim()
+          : (draft.publicKeyOrClientId || '').trim();
       const payload: Record<string, any> = {
         environment: draft.environment,
         merchantId: (draft.merchantId || '').trim(),
-        publicKeyOrClientId: (draft.publicKeyOrClientId || '').trim(),
+        publicKeyOrClientId: effectivePublicKeyOrClientId,
         secretOrSalt: (draft.secretOrSalt || '').trim(),
         webhookSecret: (draft.webhookSecret || '').trim(),
+        privateKeyId: (draft.privateKeyId || '').trim(),
+        publicKeyId: (draft.publicKeyId || effectivePublicKeyOrClientId || '').trim(),
+        payglocalPublicKeyPem: (draft.payglocalPublicKeyPem || '').trim(),
         supportedCurrencies: draft.supportedCurrencies,
         supportedMethods: draft.supportedMethods,
       };
@@ -846,6 +873,14 @@ export default function App() {
               publicKeyOrClientId: data.gateway.publicKeyOrClientId || '',
               secretOrSalt: data.gateway.secretOrSalt || '',
               webhookSecret: data.gateway.webhookSecret || '',
+              privateKeyId: data.gateway.privateKeyId || draft.privateKeyId || '',
+              publicKeyId:
+                data.gateway.publicKeyId ||
+                data.gateway.publicKeyOrClientId ||
+                draft.publicKeyId ||
+                '',
+              payglocalPublicKeyPem:
+                data.gateway.payglocalPublicKeyPem || draft.payglocalPublicKeyPem || '',
               supportedCurrencies: data.gateway.supportedCurrencies || draft.supportedCurrencies,
               supportedMethods: data.gateway.supportedMethods || draft.supportedMethods,
             },
@@ -868,12 +903,19 @@ export default function App() {
       // Save any unsaved edits first so verification tests the latest inputs
       const draft = gatewayEdits[gw.code];
       if (draft) {
+        const effectivePublicKeyOrClientId =
+          gw.code === 'PAYGLOCAL'
+            ? (draft.publicKeyId || draft.publicKeyOrClientId || '').trim()
+            : (draft.publicKeyOrClientId || '').trim();
         const savePayload: Record<string, any> = {
           environment: draft.environment,
           merchantId: (draft.merchantId || '').trim(),
-          publicKeyOrClientId: (draft.publicKeyOrClientId || '').trim(),
+          publicKeyOrClientId: effectivePublicKeyOrClientId,
           secretOrSalt: (draft.secretOrSalt || '').trim(),
           webhookSecret: (draft.webhookSecret || '').trim(),
+          privateKeyId: (draft.privateKeyId || '').trim(),
+          publicKeyId: (draft.publicKeyId || effectivePublicKeyOrClientId || '').trim(),
+          payglocalPublicKeyPem: (draft.payglocalPublicKeyPem || '').trim(),
           supportedCurrencies: draft.supportedCurrencies,
           supportedMethods: draft.supportedMethods,
         };
@@ -1463,6 +1505,13 @@ export default function App() {
 
           <div className="flex items-center gap-2.5 shrink-0">
             <button
+              onClick={() => setActiveSection('business-gst')}
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-emerald-300 bg-emerald-950/50 border border-emerald-500/40 rounded-lg hover:bg-emerald-900/50 transition-colors whitespace-nowrap shrink-0"
+            >
+              <FileText className="w-3.5 h-3.5 text-emerald-400" />
+              Edit Business Info
+            </button>
+            <button
               onClick={() => setActiveSection('payment-links')}
               className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-amber-300 bg-amber-950/50 border border-amber-500/40 rounded-lg hover:bg-amber-900/50 transition-colors whitespace-nowrap shrink-0"
             >
@@ -1657,6 +1706,24 @@ export default function App() {
                       </div>
                       <div className="text-[11px] text-slate-400">
                         Admin-controlled checkout activation
+                      </div>
+                    </div>
+
+                    <div
+                      onClick={() => setActiveSection('business-gst')}
+                      className="bg-slate-900/90 border border-emerald-500/30 rounded-xl p-4 space-y-1 cursor-pointer hover:border-emerald-500/60 transition-colors"
+                    >
+                      <div className="text-xs text-emerald-300 flex items-center justify-between">
+                        <span>Business Info &amp; GST Profile</span>
+                        <FileText className="w-3.5 h-3.5 text-emerald-400" />
+                      </div>
+                      <div className="text-base font-bold text-white truncate">
+                        {snapshot?.merchantTaxConfig?.legalEntityName || 'Click to Set Business Info'}
+                      </div>
+                      <div className="text-[11px] font-mono text-slate-400 truncate">
+                        {snapshot?.merchantTaxConfig?.merchantGstin
+                          ? `GSTIN: ${snapshot.merchantTaxConfig.merchantGstin}`
+                          : 'Click to edit GSTIN, Address & Invoice Info'}
                       </div>
                     </div>
 
@@ -2021,6 +2088,13 @@ export default function App() {
                     </div>
 
                     <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setActiveSection('business-gst')}
+                        className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded-lg hover:bg-amber-500/30"
+                      >
+                        <FileText className="w-3.5 h-3.5" />
+                        Business GST &amp; Invoice Settings
+                      </button>
                       <button
                         onClick={() => exportToCSV('allientic-orders.csv', ordersList)}
                         className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium bg-slate-900 border border-slate-800 text-slate-200 rounded-lg hover:bg-slate-800"
@@ -2864,6 +2938,9 @@ export default function App() {
                         publicKeyOrClientId: gw.publicKeyOrClientId || '',
                         secretOrSalt: gw.secretOrSalt || '',
                         webhookSecret: gw.webhookSecret || '',
+                        privateKeyId: gw.privateKeyId || '',
+                        publicKeyId: gw.publicKeyId || gw.publicKeyOrClientId || '',
+                        payglocalPublicKeyPem: gw.payglocalPublicKeyPem || '',
                         supportedCurrencies: gw.supportedCurrencies || 'INR',
                         supportedMethods: gw.supportedMethods || 'UPI,CARD',
                       };
@@ -2887,28 +2964,28 @@ export default function App() {
                         ? 'Zoho Payments Account / Org ID'
                         : isPayPal
                         ? 'PayPal Merchant / Account ID'
-                        : 'PayGlocal Merchant ID';
+                        : 'PayGlocal Merchant ID (x-gl-merchantid)';
                       const publicKeyLabel = isPayU
                         ? 'PayU Merchant Key'
                         : isZoho
                         ? 'Zoho OAuth Client ID'
                         : isPayPal
                         ? 'PayPal REST API Client ID'
-                        : 'PayGlocal Public Key ID (kid) / API Key';
+                        : 'PayGlocal Public Key ID (kid)';
                       const secretLabel = isPayU
                         ? 'PayU Merchant Salt (SHA-512)'
                         : isZoho
                         ? 'Zoho Client Secret / Signing Key'
                         : isPayPal
                         ? 'PayPal REST API Client Secret'
-                        : 'PayGlocal Private Key / JWS Signing Secret';
+                        : 'PayGlocal Merchant Private Key (.pem file)';
                       const webhookLabel = isPayU
                         ? 'PayU Webhook Secret'
                         : isZoho
                         ? 'Zoho Webhook Signing Secret'
                         : isPayPal
                         ? 'PayPal Webhook ID'
-                        : 'PayGlocal Webhook Secret (x-gl-token)';
+                        : 'PayGlocal Webhook Secret (Optional)';
 
                       return (
                         <div
@@ -2989,43 +3066,86 @@ export default function App() {
                             </div>
 
                             {isPayGlocal && (
-                              <div className="bg-slate-950 border border-emerald-500/30 rounded-lg p-3.5 space-y-2 text-xs">
-                                <div className="flex items-center justify-between">
+                              <div className="bg-slate-950 border border-emerald-500/30 rounded-lg p-3.5 space-y-2.5 text-xs">
+                                <div className="flex items-center justify-between gap-2 flex-wrap">
                                   <span className="font-semibold text-emerald-300">
-                                    PayGlocal Standard Pricing &amp; Cross-Border MDR
+                                    PayGlocal PayCollect (JWE RSA-OAEP-256 + JWS RS256)
                                   </span>
-                                  <a
-                                    href="https://payglocal.in/pricing"
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="text-[11px] font-mono text-emerald-400 hover:underline flex items-center gap-1"
-                                  >
-                                    <span>payglocal.in/pricing</span>
-                                    <ExternalLink className="w-3 h-3" />
-                                  </a>
+                                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300">
+                                    {draft.environment === 'PRODUCTION'
+                                      ? 'api.prod.payglocal.in/gl/v1/payments/initiate/paycollect'
+                                      : 'api.uat.payglocal.in/gl/v1/payments/initiate/paycollect'}
+                                  </span>
                                 </div>
-                                <div className="grid grid-cols-3 gap-2 text-[11px]">
+                                <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
                                   <div className="bg-slate-900/90 border border-slate-800 rounded p-2">
-                                    <div className="text-slate-400">UPI &amp; RuPay Debit</div>
-                                    <div className="font-mono font-bold text-white mt-0.5">
-                                      0% MDR
+                                    <div className="text-slate-400">Merchant Private Key (.pem)</div>
+                                    <div className="text-white font-bold truncate mt-0.5">
+                                      {draft.secretOrSalt?.includes('BEGIN')
+                                        ? `Loaded (${draft.secretOrSalt.trim().length} bytes)`
+                                        : gw.hasSecretConfigured
+                                        ? 'Saved in Vault ✓'
+                                        : 'Upload .pem file below'}
                                     </div>
                                   </div>
                                   <div className="bg-slate-900/90 border border-slate-800 rounded p-2">
-                                    <div className="text-slate-400">Domestic Cards / NB</div>
-                                    <div className="font-mono font-bold text-white mt-0.5">
-                                      1.85% – 2.00%
-                                    </div>
-                                  </div>
-                                  <div className="bg-slate-900/90 border border-slate-800 rounded p-2">
-                                    <div className="text-slate-400">Intl Cards (130+ Currencies)</div>
-                                    <div className="font-mono font-bold text-emerald-400 mt-0.5">
-                                      2.99% – 3.30%
+                                    <div className="text-slate-400">PayGlocal Public Key (.pem)</div>
+                                    <div className="text-emerald-400 font-bold truncate mt-0.5">
+                                      {draft.payglocalPublicKeyPem?.includes('BEGIN')
+                                        ? `Loaded (${draft.payglocalPublicKeyPem.trim().length} bytes)`
+                                        : gw.hasPayGlocalPublicKeyPem
+                                        ? 'Saved in Vault ✓'
+                                        : 'Optional / Upload .pem'}
                                     </div>
                                   </div>
                                 </div>
-                                <div className="text-[11px] font-mono text-slate-400">
-                                  Setup Fee: ₹0 · Annual Maintenance (AMC): ₹0 · Protocol: JWE/JWS (x-gl-token)
+
+                                <div className="bg-slate-900/90 border border-slate-800 rounded p-2.5 space-y-1.5 text-[11px]">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-slate-400">PayGlocal Callback URL:</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const url = `${window.location.origin}/api/v1/callbacks/payglocal`;
+                                        navigator.clipboard.writeText(url);
+                                        showToast(`Copied PayGlocal Callback URL: ${url}`);
+                                      }}
+                                      className="font-mono text-emerald-400 hover:underline truncate"
+                                    >
+                                      {typeof window !== 'undefined'
+                                        ? `${window.location.origin}/api/v1/callbacks/payglocal`
+                                        : 'https://checkout.xperiserv.in/api/v1/callbacks/payglocal'}{' '}
+                                      (Copy)
+                                    </button>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-slate-400">PayGlocal Webhook URL:</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const url = `${window.location.origin}/api/v1/webhooks/payglocal`;
+                                        navigator.clipboard.writeText(url);
+                                        showToast(`Copied PayGlocal Webhook URL: ${url}`);
+                                      }}
+                                      className="font-mono text-emerald-400 hover:underline truncate"
+                                    >
+                                      {typeof window !== 'undefined'
+                                        ? `${window.location.origin}/api/v1/webhooks/payglocal`
+                                        : 'https://checkout.xperiserv.in/api/v1/webhooks/payglocal'}{' '}
+                                      (Copy)
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <div className="text-[11px] text-slate-400 leading-relaxed">
+                                  Upload your exact <strong className="text-slate-200">Merchant Private Key (.pem)</strong>{' '}
+                                  and <strong className="text-slate-200">PayGlocal Public Key (.pem)</strong> as-is from{' '}
+                                  <span className="font-mono text-emerald-400">
+                                    PayGlocal Merchant Dashboard → API Keys
+                                  </span>
+                                  , then enter your <strong className="text-slate-200">Merchant ID</strong>,{' '}
+                                  <strong className="text-slate-200">Private Key ID (x-gl-kid)</strong>, and{' '}
+                                  <strong className="text-slate-200">Public Key ID (kid)</strong>.
                                 </div>
                               </div>
                             )}
@@ -3155,67 +3275,242 @@ export default function App() {
                                 />
                               </div>
 
-                              <div>
-                                <label className="text-slate-400 block mb-1 font-medium text-emerald-300">
-                                  {publicKeyLabel} *
-                                </label>
-                                <input
-                                  type="text"
-                                  value={draft.publicKeyOrClientId}
-                                  onChange={(e) =>
-                                    setGatewayEdits((prev) => ({
-                                      ...prev,
-                                      [gw.code]: { ...draft, publicKeyOrClientId: e.target.value },
-                                    }))
-                                  }
-                                  placeholder={
-                                    isPayU
-                                      ? 'Enter PayU Merchant Key'
-                                      : isZoho
-                                      ? 'Enter Zoho OAuth Client ID (1000.xxxx)'
-                                      : isPayPal
-                                      ? 'Enter PayPal REST Client ID (A...)'
-                                      : 'Enter PayGlocal Public Key ID (kid) / API Key'
-                                  }
-                                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
-                                />
-                              </div>
+                              {isPayGlocal ? (
+                                <>
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    <div>
+                                      <label className="text-slate-400 block mb-1 font-medium text-emerald-300">
+                                        Private Key ID (x-gl-kid) *
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={draft.privateKeyId}
+                                        onChange={(e) =>
+                                          setGatewayEdits((prev) => ({
+                                            ...prev,
+                                            [gw.code]: { ...draft, privateKeyId: e.target.value },
+                                          }))
+                                        }
+                                        placeholder="Enter Private Key ID (kid for signing)"
+                                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="text-slate-400 block mb-1 font-medium text-emerald-300">
+                                        {publicKeyLabel} *
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={draft.publicKeyId || draft.publicKeyOrClientId}
+                                        onChange={(e) =>
+                                          setGatewayEdits((prev) => ({
+                                            ...prev,
+                                            [gw.code]: {
+                                              ...draft,
+                                              publicKeyId: e.target.value,
+                                              publicKeyOrClientId: e.target.value,
+                                            },
+                                          }))
+                                        }
+                                        placeholder="Enter PayGlocal Public Key ID (kid for JWE)"
+                                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
+                                      />
+                                    </div>
+                                  </div>
 
-                              <div>
-                                <div className="flex items-center justify-between mb-1">
-                                  <label className="text-slate-400 font-medium text-emerald-300">
-                                    {secretLabel} *
-                                  </label>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      setShowGatewaySecret((prev) => ({
-                                        ...prev,
-                                        [gw.code]: !prev[gw.code],
-                                      }))
-                                    }
-                                    className="text-[11px] font-mono text-emerald-400 hover:underline"
-                                  >
-                                    {showGatewaySecret[gw.code] ? 'Hide' : 'Show'}
-                                  </button>
-                                </div>
-                                <input
-                                  type={showGatewaySecret[gw.code] ? 'text' : 'password'}
-                                  value={draft.secretOrSalt}
-                                  onChange={(e) =>
-                                    setGatewayEdits((prev) => ({
-                                      ...prev,
-                                      [gw.code]: { ...draft, secretOrSalt: e.target.value },
-                                    }))
-                                  }
-                                  placeholder={
-                                    gw.hasSecretConfigured
-                                      ? '•••••••••••••••• (Saved — enter new value to replace)'
-                                      : `Enter ${secretLabel}`
-                                  }
-                                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
-                                />
-                              </div>
+                                  <div>
+                                    <div className="flex items-center justify-between gap-2 mb-1">
+                                      <label className="text-slate-400 font-medium text-emerald-300">
+                                        {secretLabel} *
+                                      </label>
+                                      <div className="flex items-center gap-2.5">
+                                        <label className="cursor-pointer inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-950/70 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-900/60 text-[11px] font-medium">
+                                          <Upload className="w-3 h-3" />
+                                          <span>Upload .pem</span>
+                                          <input
+                                            type="file"
+                                            accept=".pem,.key,.txt"
+                                            className="hidden"
+                                            onChange={(e) => {
+                                              const file = e.target.files?.[0];
+                                              if (!file) return;
+                                              const reader = new FileReader();
+                                              reader.onload = () => {
+                                                const text =
+                                                  typeof reader.result === 'string'
+                                                    ? reader.result
+                                                    : '';
+                                                setGatewayEdits((prev) => ({
+                                                  ...prev,
+                                                  [gw.code]: { ...draft, secretOrSalt: text },
+                                                }));
+                                                showToast(
+                                                  `Loaded Merchant Private Key (${file.name}, ${text.trim().length} bytes)`
+                                                );
+                                              };
+                                              reader.readAsText(file);
+                                              e.target.value = '';
+                                            }}
+                                          />
+                                        </label>
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setShowGatewaySecret((prev) => ({
+                                              ...prev,
+                                              [gw.code]: !prev[gw.code],
+                                            }))
+                                          }
+                                          className="text-[11px] font-mono text-emerald-400 hover:underline"
+                                        >
+                                          {showGatewaySecret[gw.code] ? 'Hide' : 'Show'}
+                                        </button>
+                                      </div>
+                                    </div>
+                                    {showGatewaySecret[gw.code] || !draft.secretOrSalt ? (
+                                      <textarea
+                                        rows={4}
+                                        value={draft.secretOrSalt}
+                                        onChange={(e) =>
+                                          setGatewayEdits((prev) => ({
+                                            ...prev,
+                                            [gw.code]: { ...draft, secretOrSalt: e.target.value },
+                                          }))
+                                        }
+                                        placeholder={`-----BEGIN PRIVATE KEY-----\nUpload your .pem file or paste Merchant Private Key PEM here...\n-----END PRIVATE KEY-----`}
+                                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-[11px] text-slate-100 focus:outline-none focus:border-emerald-500"
+                                      />
+                                    ) : (
+                                      <div className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 font-mono text-[11px] text-emerald-300 flex items-center justify-between">
+                                        <span>
+                                          PEM Private Key loaded ({draft.secretOrSalt.trim().length}{' '}
+                                          bytes) — click Show to inspect or Upload .pem to replace
+                                        </span>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div>
+                                    <div className="flex items-center justify-between gap-2 mb-1">
+                                      <label className="text-slate-400 font-medium text-emerald-300">
+                                        PayGlocal Public Key (.pem file — for JWE Encryption &amp; Callback Verification)
+                                      </label>
+                                      <label className="cursor-pointer inline-flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 hover:bg-slate-700 text-[11px] font-medium">
+                                        <Upload className="w-3 h-3" />
+                                        <span>Upload Public .pem</span>
+                                        <input
+                                          type="file"
+                                          accept=".pem,.crt,.cer,.key,.txt"
+                                          className="hidden"
+                                          onChange={(e) => {
+                                            const file = e.target.files?.[0];
+                                            if (!file) return;
+                                            const reader = new FileReader();
+                                            reader.onload = () => {
+                                              const text =
+                                                typeof reader.result === 'string'
+                                                  ? reader.result
+                                                  : '';
+                                              setGatewayEdits((prev) => ({
+                                                ...prev,
+                                                [gw.code]: {
+                                                  ...draft,
+                                                  payglocalPublicKeyPem: text,
+                                                },
+                                              }));
+                                              showToast(
+                                                `Loaded PayGlocal Public Key (${file.name}, ${text.trim().length} bytes)`
+                                              );
+                                            };
+                                            reader.readAsText(file);
+                                            e.target.value = '';
+                                          }}
+                                        />
+                                      </label>
+                                    </div>
+                                    <textarea
+                                      rows={3}
+                                      value={draft.payglocalPublicKeyPem}
+                                      onChange={(e) =>
+                                        setGatewayEdits((prev) => ({
+                                          ...prev,
+                                          [gw.code]: {
+                                            ...draft,
+                                            payglocalPublicKeyPem: e.target.value,
+                                          },
+                                        }))
+                                      }
+                                      placeholder={`-----BEGIN PUBLIC KEY-----\nUpload PayGlocal's Public Key .pem file (required for JWE+JWS PayCollect)...\n-----END PUBLIC KEY-----`}
+                                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-[11px] text-slate-100 focus:outline-none focus:border-emerald-500"
+                                    />
+                                  </div>
+                                </>
+                              ) : (
+                                <>
+                                  <div>
+                                    <label className="text-slate-400 block mb-1 font-medium text-emerald-300">
+                                      {publicKeyLabel} *
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={draft.publicKeyOrClientId}
+                                      onChange={(e) =>
+                                        setGatewayEdits((prev) => ({
+                                          ...prev,
+                                          [gw.code]: {
+                                            ...draft,
+                                            publicKeyOrClientId: e.target.value,
+                                          },
+                                        }))
+                                      }
+                                      placeholder={
+                                        isPayU
+                                          ? 'Enter PayU Merchant Key'
+                                          : isZoho
+                                          ? 'Enter Zoho OAuth Client ID (1000.xxxx)'
+                                          : 'Enter PayPal REST Client ID (A...)'
+                                      }
+                                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
+                                    />
+                                  </div>
+
+                                  <div>
+                                    <div className="flex items-center justify-between mb-1">
+                                      <label className="text-slate-400 font-medium text-emerald-300">
+                                        {secretLabel} *
+                                      </label>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setShowGatewaySecret((prev) => ({
+                                            ...prev,
+                                            [gw.code]: !prev[gw.code],
+                                          }))
+                                        }
+                                        className="text-[11px] font-mono text-emerald-400 hover:underline"
+                                      >
+                                        {showGatewaySecret[gw.code] ? 'Hide' : 'Show'}
+                                      </button>
+                                    </div>
+                                    <input
+                                      type={showGatewaySecret[gw.code] ? 'text' : 'password'}
+                                      value={draft.secretOrSalt}
+                                      onChange={(e) =>
+                                        setGatewayEdits((prev) => ({
+                                          ...prev,
+                                          [gw.code]: { ...draft, secretOrSalt: e.target.value },
+                                        }))
+                                      }
+                                      placeholder={
+                                        gw.hasSecretConfigured
+                                          ? '•••••••••••••••• (Saved — enter new value to replace)'
+                                          : `Enter ${secretLabel}`
+                                      }
+                                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
+                                    />
+                                  </div>
+                                </>
+                              )}
 
                               <div>
                                 <label className="text-slate-400 block mb-1">{webhookLabel}</label>
@@ -4398,27 +4693,57 @@ export default function App() {
                 </div>
               )}
 
+              {/* BUSINESS GST, COMPANY PROFILE & TAX INVOICE CUSTOMIZATION */}
+              {activeSection === 'business-gst' && (
+                <BusinessGstInvoiceEditor
+                  initialConfig={snapshot?.merchantTaxConfig}
+                  orders={ordersList}
+                  authToken={authToken}
+                  showToast={showToast}
+                  onSaved={fetchPlatformData}
+                  onOpenInvoiceModal={(ord) => setInvoicePreviewOrder(ord)}
+                  onOpenEditOrderModal={(ord) => setEditingOrder(ord)}
+                />
+              )}
+
               {/* 17. SYSTEM SETTINGS & SELF-HOSTED INFRASTRUCTURE */}
               {activeSection === 'settings' && (
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 text-xs">
-                  <div className="lg:col-span-6 bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
-                    <h3 className="text-sm font-bold text-white">
-                      Platform Identity &amp; Endpoint Topology
-                    </h3>
-                    <div className="space-y-3">
-                      <div>
-                        <span className="text-slate-400 block mb-1">Product &amp; Company</span>
-                        <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-100 font-medium">
-                          {platformSettings.productName || 'Allientic Checkout'} —{' '}
-                          {platformSettings.companyName || 'Allientic Lab Technologies'}
+                <div className="space-y-6">
+                  <BusinessGstInvoiceEditor
+                    initialConfig={snapshot?.merchantTaxConfig}
+                    orders={ordersList}
+                    authToken={authToken}
+                    showToast={showToast}
+                    onSaved={fetchPlatformData}
+                    onOpenInvoiceModal={(ord) => setInvoicePreviewOrder(ord)}
+                    onOpenEditOrderModal={(ord) => setEditingOrder(ord)}
+                  />
+
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 text-xs">
+                    <div className="lg:col-span-6 bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
+                      <h3 className="text-sm font-bold text-white">
+                        Platform Identity &amp; Endpoint Topology
+                      </h3>
+                      <div className="space-y-3">
+                        <div>
+                          <span className="text-slate-400 block mb-1">Product &amp; Company</span>
+                          <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-100 font-medium">
+                            {snapshot?.merchantTaxConfig?.brandName ||
+                              platformSettings.productName ||
+                              'Allientic Checkout'}{' '}
+                            —{' '}
+                            {snapshot?.merchantTaxConfig?.legalEntityName ||
+                              platformSettings.companyName ||
+                              'Allientic Lab Technologies'}
+                          </div>
                         </div>
-                      </div>
-                      <div>
-                        <span className="text-slate-400 block mb-1">Primary Production Domain</span>
-                        <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-emerald-400">
-                          https://checkout.xperiserv.in
+                        <div>
+                          <span className="text-slate-400 block mb-1">Primary Production Domain</span>
+                          <div className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-emerald-400">
+                            {snapshot?.merchantTaxConfig?.websiteUrl ||
+                              'https://checkout.xperiserv.in'}
+                          </div>
                         </div>
-                      </div>
                       <div className="grid grid-cols-2 gap-3">
                         <div>
                           <span className="text-slate-400 block mb-1">Admin Portal</span>
@@ -4573,6 +4898,7 @@ export default function App() {
                       {purgingData ? 'Purging Database...' : 'Purge All Orders, Products & Test Data'}
                     </button>
                   </div>
+                </div>
                 </div>
               )}
 
@@ -5505,6 +5831,12 @@ export default function App() {
       {invoicePreviewOrder && (
         <InvoicePreviewModal
           order={invoicePreviewOrder}
+          merchantTaxConfig={snapshot?.merchantTaxConfig}
+          authToken={authToken}
+          onSaved={async () => {
+            await fetchPlatformData();
+            showToast('GST Invoice & Business Information updated');
+          }}
           onClose={() => setInvoicePreviewOrder(null)}
         />
       )}

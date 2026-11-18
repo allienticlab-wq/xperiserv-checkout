@@ -7,16 +7,16 @@ export const CreateOrderModal: React.FC<{
   onCreated: (checkoutSessionToken?: string) => Promise<void>;
   authToken: string | null;
 }> = ({ products, onClose, onCreated, authToken }) => {
-  const [customerName, setCustomerName] = useState('Karan Malhotra');
-  const [customerEmail, setCustomerEmail] = useState('karan.malhotra@nexustech.in');
-  const [customerMobile, setCustomerMobile] = useState('+91 98112 34091');
-  const [companyName, setCompanyName] = useState('Nexus Enterprise Systems Pvt Ltd');
-  const [gstin, setGstin] = useState('29AABCN7721E1Z1');
-  const [customReference, setCustomReference] = useState(
-    `PO-NEXUS-${Math.floor(100 + Math.random() * 899)}`
-  );
+  const [customerName, setCustomerName] = useState('');
+  const [customerEmail, setCustomerEmail] = useState('');
+  const [customerMobile, setCustomerMobile] = useState('');
+  const [companyName, setCompanyName] = useState('');
+  const [gstin, setGstin] = useState('');
+  const [customReference, setCustomReference] = useState('');
   const [couponCode, setCouponCode] = useState('');
-  const [selectedGateway, setSelectedGateway] = useState<'PAYU' | 'ZOHO_PAYMENTS'>('PAYU');
+  const [selectedGateway, setSelectedGateway] = useState<
+    'PAYU' | 'ZOHO_PAYMENTS' | 'PAYPAL' | 'PAYGLOCAL'
+  >('PAYU');
   const [selectedItems, setSelectedItems] = useState<
     Array<{
       productId?: number;
@@ -43,11 +43,11 @@ export const CreateOrderModal: React.FC<{
     }
     return [
       {
-        sku: 'ALT-CLD-ENT-01',
-        name: 'Allientic Cloud Enterprise Cluster',
-        description: 'Dedicated high-availability infrastructure',
+        sku: 'CUSTOM-01',
+        name: 'Custom Service / Product',
+        description: 'Order line item',
         quantity: 1,
-        unitPricePaise: 4500000,
+        unitPricePaise: 100000,
         taxRatePercent: 18,
       },
     ];
@@ -61,11 +61,11 @@ export const CreateOrderModal: React.FC<{
       ...prev,
       {
         productId: p?.id,
-        sku: p?.sku || 'ALT-CUSTOM-01',
-        name: p?.name || 'Custom Enterprise Service',
-        description: p?.description || 'Professional deployment service',
+        sku: p?.sku || `ITEM-${prev.length + 1}`,
+        name: p?.name || 'Line Item',
+        description: p?.description || '',
         quantity: 1,
-        unitPricePaise: p?.unitPricePaise || 1500000,
+        unitPricePaise: p?.unitPricePaise || 100000,
         taxRatePercent: p?.taxRatePercent || 18,
       },
     ]);
@@ -198,10 +198,16 @@ export const CreateOrderModal: React.FC<{
               <label className="block text-slate-400 mb-1">Preferred Payment Gateway</label>
               <select
                 value={selectedGateway}
-                onChange={(e) => setSelectedGateway(e.target.value as 'PAYU' | 'ZOHO_PAYMENTS')}
+                onChange={(e) =>
+                  setSelectedGateway(
+                    e.target.value as 'PAYU' | 'ZOHO_PAYMENTS' | 'PAYPAL' | 'PAYGLOCAL'
+                  )
+                }
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-100"
               >
                 <option value="PAYU">PayU India (UPI, Cards, NetBanking, Wallets)</option>
+                <option value="PAYGLOCAL">PayGlocal (Cross-Border &amp; Domestic)</option>
+                <option value="PAYPAL">PayPal Checkout</option>
                 <option value="ZOHO_PAYMENTS">Zoho Payments (UPI, Cards, NetBanking)</option>
               </select>
             </div>
@@ -303,7 +309,7 @@ export const CreateOrderModal: React.FC<{
                 type="text"
                 value={couponCode}
                 onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
-                placeholder="ALLIENTIC10 or XPERISERV2500"
+                placeholder="Enter promo code"
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
               />
             </div>
@@ -489,11 +495,15 @@ export const RefundModal: React.FC<{
 
 export const InvoicePreviewModal: React.FC<{
   order: any;
+  merchantTaxConfig?: any;
+  authToken?: string | null;
+  onSaved?: () => Promise<void>;
   onClose: () => void;
-}> = ({ order, onClose }) => {
-  const items = (() => {
+}> = ({ order, merchantTaxConfig, authToken, onSaved, onClose }) => {
+  const initialItems = (() => {
     try {
-      return JSON.parse(order.itemsJson || '[]');
+      const parsed = JSON.parse(order.itemsJson || '[]');
+      return Array.isArray(parsed) ? parsed : [];
     } catch {
       return [];
     }
@@ -508,29 +518,240 @@ export const InvoicePreviewModal: React.FC<{
     }
   })();
 
+  const bizDefaults = {
+    merchantGstin: billingMeta.merchantGstin || merchantTaxConfig?.merchantGstin || '',
+    legalEntityName:
+      billingMeta.merchantLegalName || merchantTaxConfig?.legalEntityName || '',
+    brandName:
+      billingMeta.merchantBrandName || merchantTaxConfig?.brandName || 'Allientic Checkout',
+    panNumber: billingMeta.merchantPan || merchantTaxConfig?.panNumber || '',
+    cinNumber: billingMeta.merchantCin || merchantTaxConfig?.cinNumber || '',
+    stateCode: billingMeta.merchantStateCode || merchantTaxConfig?.stateCode || '',
+    defaultHsnSac:
+      billingMeta.hsnSacCode || merchantTaxConfig?.defaultHsnSac || '998314',
+    taxBreakdownMode:
+      billingMeta.taxBreakdownMode || merchantTaxConfig?.taxBreakdownMode || 'AUTO',
+    registeredAddress:
+      billingMeta.merchantAddress || merchantTaxConfig?.registeredAddress || '',
+    corporateOfficeAddress: merchantTaxConfig?.corporateOfficeAddress || '',
+    supportEmail:
+      billingMeta.merchantEmail || merchantTaxConfig?.supportEmail || '',
+    supportPhone:
+      billingMeta.merchantPhone || merchantTaxConfig?.supportPhone || '',
+    websiteUrl: merchantTaxConfig?.websiteUrl || 'https://checkout.xperiserv.in',
+    bankName: merchantTaxConfig?.bankName || '',
+    bankAccountName: merchantTaxConfig?.bankAccountName || '',
+    bankAccountNumber: merchantTaxConfig?.bankAccountNumber || '',
+    bankIfscCode: merchantTaxConfig?.bankIfscCode || '',
+    bankUpiId: merchantTaxConfig?.bankUpiId || '',
+    authorizedSignatory: merchantTaxConfig?.authorizedSignatory || '',
+    invoiceFooterNotes:
+      billingMeta.invoiceNotes || merchantTaxConfig?.invoiceFooterNotes || '',
+    invoiceTerms:
+      billingMeta.invoiceTerms || merchantTaxConfig?.invoiceTerms || '',
+  };
+
+  const [isEditingInvoice, setIsEditingInvoice] = useState(false);
+  const [savingInvoice, setSavingInvoice] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [updateGlobalBusinessProfile, setUpdateGlobalBusinessProfile] = useState(true);
+
+  // Editable Invoice & Business GST states
+  const [invoiceNumber, setInvoiceNumber] = useState<string>(
+    order.invoiceNumber || `INV-${order.orderNumber}`
+  );
+  const [customReference, setCustomReference] = useState<string>(order.customReference || '');
+  const [customerName, setCustomerName] = useState<string>(order.customerName || '');
+  const [customerEmail, setCustomerEmail] = useState<string>(order.customerEmail || '');
+  const [customerMobile, setCustomerMobile] = useState<string>(order.customerMobile || '');
+  const [customerCompany, setCustomerCompany] = useState<string>(billingMeta.companyName || '');
+  const [customerGstin, setCustomerGstin] = useState<string>(billingMeta.gstin || '');
+  const [customerAddress, setCustomerAddress] = useState<string>(
+    [billingMeta.line1, billingMeta.city, billingMeta.state, billingMeta.postalCode]
+      .filter(Boolean)
+      .join(', ') ||
+      order.billingAddress ||
+      ''
+  );
+
+  const [merchantLegalName, setMerchantLegalName] = useState<string>(bizDefaults.legalEntityName);
+  const [merchantBrandName, setMerchantBrandName] = useState<string>(bizDefaults.brandName);
+  const [merchantGstin, setMerchantGstin] = useState<string>(bizDefaults.merchantGstin);
+  const [merchantPan, setMerchantPan] = useState<string>(bizDefaults.panNumber);
+  const [merchantCin, setMerchantCin] = useState<string>(bizDefaults.cinNumber);
+  const [merchantStateCode, setMerchantStateCode] = useState<string>(bizDefaults.stateCode);
+  const [hsnSacCode, setHsnSacCode] = useState<string>(bizDefaults.defaultHsnSac);
+  const [taxBreakdownMode, setTaxBreakdownMode] = useState<string>(bizDefaults.taxBreakdownMode);
+  const [merchantAddress, setMerchantAddress] = useState<string>(bizDefaults.registeredAddress);
+  const [merchantEmail, setMerchantEmail] = useState<string>(bizDefaults.supportEmail);
+  const [merchantPhone, setMerchantPhone] = useState<string>(bizDefaults.supportPhone);
+  const [bankName, setBankName] = useState<string>(bizDefaults.bankName);
+  const [bankAccountNumber, setBankAccountNumber] = useState<string>(
+    bizDefaults.bankAccountNumber
+  );
+  const [bankIfscCode, setBankIfscCode] = useState<string>(bizDefaults.bankIfscCode);
+  const [bankUpiId, setBankUpiId] = useState<string>(bizDefaults.bankUpiId);
+  const [authorizedSignatory, setAuthorizedSignatory] = useState<string>(
+    bizDefaults.authorizedSignatory
+  );
+  const [invoiceNotes, setInvoiceNotes] = useState<string>(bizDefaults.invoiceFooterNotes);
+  const [invoiceTerms, setInvoiceTerms] = useState<string>(bizDefaults.invoiceTerms);
+
   const formatINR = (paise: number) =>
     `₹${((paise || 0) / 100).toLocaleString('en-IN', {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     })}`;
 
+  // Determine Intra-state (CGST + SGST) vs Inter-state (IGST)
+  const merchantStatePrefix = (merchantGstin || '29').slice(0, 2);
+  const customerStatePrefix = (customerGstin || '').slice(0, 2);
+  const isIntraState =
+    taxBreakdownMode === 'CGST_SGST' ||
+    (taxBreakdownMode === 'AUTO' &&
+      customerStatePrefix.length === 2 &&
+      customerStatePrefix === merchantStatePrefix);
+
+  const cgstPaise = Math.round((order.taxAmountPaise || 0) / 2);
+  const sgstPaise = (order.taxAmountPaise || 0) - cgstPaise;
+
+  const handleSaveInvoiceAndGst = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingInvoice(true);
+    setSaveError(null);
+    setSaveMessage(null);
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) headers.Authorization = `Bearer ${authToken}`;
+
+      // 1. Update this order's invoice & GST information
+      const updatedBilling = {
+        ...billingMeta,
+        line1: customerAddress.trim(),
+        companyName: customerCompany.trim(),
+        gstin: customerGstin.trim().toUpperCase(),
+        merchantGstin: merchantGstin.trim().toUpperCase(),
+        merchantLegalName: merchantLegalName.trim(),
+        merchantBrandName: merchantBrandName.trim(),
+        merchantPan: merchantPan.trim().toUpperCase(),
+        merchantCin: merchantCin.trim().toUpperCase(),
+        merchantStateCode: merchantStateCode.trim(),
+        merchantAddress: merchantAddress.trim(),
+        merchantEmail: merchantEmail.trim(),
+        merchantPhone: merchantPhone.trim(),
+        hsnSacCode: hsnSacCode.trim(),
+        taxBreakdownMode,
+        invoiceNotes: invoiceNotes.trim(),
+        invoiceTerms: invoiceTerms.trim(),
+      };
+
+      const orderRes = await fetch(`/api/v1/orders/${order.id}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({
+          invoiceNumber: invoiceNumber.trim(),
+          customReference: customReference.trim(),
+          customerName: customerName.trim(),
+          customerEmail: customerEmail.trim(),
+          customerMobile: customerMobile.trim(),
+          customerGstin: customerGstin.trim().toUpperCase(),
+          companyName: customerCompany.trim(),
+          billingAddress: JSON.stringify(updatedBilling),
+          merchantGstin: merchantGstin.trim().toUpperCase(),
+          merchantLegalName: merchantLegalName.trim(),
+          merchantPan: merchantPan.trim().toUpperCase(),
+          merchantCin: merchantCin.trim().toUpperCase(),
+          merchantStateCode: merchantStateCode.trim(),
+          merchantAddress: merchantAddress.trim(),
+          merchantEmail: merchantEmail.trim(),
+          merchantPhone: merchantPhone.trim(),
+          hsnSacCode: hsnSacCode.trim(),
+          invoiceNotes: invoiceNotes.trim(),
+          invoiceTerms: invoiceTerms.trim(),
+          taxBreakdownMode,
+        }),
+      });
+      if (!orderRes.ok) {
+        const errData = await orderRes.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to update order invoice');
+      }
+
+      // 2. Also update global Business GST & Invoice Settings if checked
+      if (updateGlobalBusinessProfile) {
+        await fetch('/api/v1/merchant-tax-config', {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({
+            merchantGstin: merchantGstin.trim().toUpperCase(),
+            legalEntityName: merchantLegalName.trim(),
+            brandName: merchantBrandName.trim(),
+            panNumber: merchantPan.trim().toUpperCase(),
+            cinNumber: merchantCin.trim().toUpperCase(),
+            stateCode: merchantStateCode.trim(),
+            defaultHsnSac: hsnSacCode.trim(),
+            taxBreakdownMode,
+            registeredAddress: merchantAddress.trim(),
+            supportEmail: merchantEmail.trim(),
+            supportPhone: merchantPhone.trim(),
+            bankName: bankName.trim(),
+            bankAccountNumber: bankAccountNumber.trim(),
+            bankIfscCode: bankIfscCode.trim().toUpperCase(),
+            bankUpiId: bankUpiId.trim(),
+            authorizedSignatory: authorizedSignatory.trim(),
+            invoiceFooterNotes: invoiceNotes.trim(),
+            invoiceTerms: invoiceTerms.trim(),
+            syncExistingInvoices: true,
+          }),
+        });
+      }
+
+      if (onSaved) {
+        await onSaved();
+      }
+      setIsEditingInvoice(false);
+      setSaveMessage('Invoice & Business GST details updated.');
+    } catch (err: any) {
+      setSaveError(err.message || 'Unable to save invoice updates');
+    } finally {
+      setSavingInvoice(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-      <div className="bg-slate-900 border border-slate-800 rounded-xl max-w-2xl w-full p-6 space-y-6">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+      <div className="bg-slate-900 border border-slate-800 rounded-xl max-w-3xl w-full p-6 space-y-5 my-8 max-h-[92vh] overflow-y-auto">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
           <div>
             <div className="text-xs text-emerald-400 font-semibold flex items-center gap-2">
-              <span>Allientic Lab Technologies · GST Tax Invoice</span>
+              <span>{merchantLegalName} · GST Tax Invoice</span>
               <span className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[10px] font-mono text-slate-300">
                 {order.isPrivateLinkOrder ? 'Private Link Order' : 'Public Storefront Order'}
               </span>
             </div>
-            <h3 className="text-lg font-bold text-white font-mono">
-              {order.invoiceNumber || `INV-${order.orderNumber}`}
-            </h3>
+            <h3 className="text-lg font-bold text-white font-mono">{invoiceNumber}</h3>
+            <div className="text-[11px] text-slate-400 font-mono">
+              Order: {order.orderNumber} · Date:{' '}
+              {order.createdAt ? new Date(order.createdAt).toLocaleDateString('en-IN') : 'Today'}
+              {customReference ? ` · Ref: ${customReference}` : ''}
+            </div>
           </div>
           <div className="flex items-center gap-2">
+            {onSaved && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsEditingInvoice((prev) => !prev);
+                  setSaveError(null);
+                  setSaveMessage(null);
+                }}
+                className="px-3 py-1.5 text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded-lg hover:bg-amber-500/30"
+              >
+                {isEditingInvoice ? 'Back to Invoice Preview' : 'Edit Invoice & GST Info'}
+              </button>
+            )}
             <button
+              type="button"
               onClick={() => window.print()}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-emerald-600 text-white rounded-lg hover:bg-emerald-500"
             >
@@ -543,108 +764,480 @@ export const InvoicePreviewModal: React.FC<{
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-6 text-xs">
-          <div>
-            <div className="text-slate-500 mb-1">Issued By (Merchant)</div>
-            <div className="font-semibold text-white">Allientic Lab Technologies Pvt. Ltd.</div>
-            <div className="text-slate-400">https://checkout.xperiserv.in</div>
-            <div className="text-emerald-400 font-mono font-semibold mt-0.5">
-              Merchant GSTIN: {billingMeta.merchantGstin || '29AABCA8921K1Z5'}
-            </div>
-            <div className="text-slate-500 font-mono text-[11px]">
-              State Code: 29 (Karnataka) · SAC: 998314
-            </div>
+        {saveMessage && (
+          <div className="bg-emerald-950/60 border border-emerald-700 text-emerald-200 text-xs p-3 rounded-lg">
+            {saveMessage}
           </div>
-          <div className="text-right">
-            <div className="text-slate-500 mb-1">Billed To (Customer)</div>
-            <div className="font-semibold text-white">{order.customerName}</div>
-            {billingMeta.companyName && (
-              <div className="text-slate-200 font-medium">{billingMeta.companyName}</div>
-            )}
-            <div className="text-slate-400">{order.customerEmail}</div>
-            <div className="text-slate-400 font-mono">{order.customerMobile}</div>
-            {billingMeta.gstin ? (
-              <div className="text-emerald-400 font-mono font-semibold mt-0.5">
-                Customer GSTIN: {billingMeta.gstin}
-              </div>
-            ) : (
-              <div className="text-slate-500 font-mono text-[11px] mt-0.5">
-                Customer GSTIN: Unregistered / B2C Consumer
-              </div>
-            )}
-            {billingMeta.detectedCountry && (
-              <div className="text-slate-500 font-mono text-[10px]">
-                IP: {billingMeta.detectedIp || 'Verified'} · {billingMeta.detectedCountry}{' '}
-                {billingMeta.displayCurrency ? `(${billingMeta.displayCurrency})` : ''}
-              </div>
-            )}
+        )}
+        {saveError && (
+          <div className="bg-rose-950/60 border border-rose-800 text-rose-200 text-xs p-3 rounded-lg">
+            {saveError}
           </div>
-        </div>
+        )}
 
-        <table className="w-full text-left border-collapse text-xs">
-          <thead>
-            <tr className="border-b border-slate-800 text-slate-400">
-              <th className="py-2">Description &amp; SKU</th>
-              <th className="py-2 text-right">Qty</th>
-              <th className="py-2 text-right">Unit Price</th>
-              <th className="py-2 text-right">Line Total</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-800/60">
-            {items.map((item: any, idx: number) => (
-              <tr key={idx}>
-                <td className="py-2.5">
-                  <div className="font-medium text-slate-100">{item.name}</div>
-                  <div className="text-[11px] font-mono text-slate-500">
-                    SKU: {item.sku} · GST: {item.taxRatePercent ?? 18}%
+        {isEditingInvoice ? (
+          <form onSubmit={handleSaveInvoiceAndGst} className="space-y-4 text-xs">
+            <div className="bg-slate-950 border border-slate-800 rounded-lg p-4 space-y-3">
+              <h4 className="font-bold text-emerald-400 uppercase tracking-wider text-[11px]">
+                1. Business GST, Legal Identity &amp; Company Information (Supplier)
+              </h4>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-slate-400 mb-1">Business Legal Name *</label>
+                  <input
+                    type="text"
+                    required
+                    value={merchantLegalName}
+                    onChange={(e) => setMerchantLegalName(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Brand / Trade Name</label>
+                  <input
+                    type="text"
+                    value={merchantBrandName}
+                    onChange={(e) => setMerchantBrandName(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Business GSTIN (15-Digit) *</label>
+                  <input
+                    type="text"
+                    required
+                    maxLength={15}
+                    value={merchantGstin}
+                    onChange={(e) => setMerchantGstin(e.target.value.toUpperCase())}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-emerald-300 uppercase"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Business PAN Number</label>
+                  <input
+                    type="text"
+                    maxLength={10}
+                    value={merchantPan}
+                    onChange={(e) => setMerchantPan(e.target.value.toUpperCase())}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-white uppercase"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">CIN / Registration No.</label>
+                  <input
+                    type="text"
+                    value={merchantCin}
+                    onChange={(e) => setMerchantCin(e.target.value.toUpperCase())}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-white uppercase"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">State &amp; State Code</label>
+                  <input
+                    type="text"
+                    value={merchantStateCode}
+                    onChange={(e) => setMerchantStateCode(e.target.value)}
+                    placeholder="e.g. 21 (Odisha)"
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Default HSN / SAC Code</label>
+                  <input
+                    type="text"
+                    value={hsnSacCode}
+                    onChange={(e) => setHsnSacCode(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Billing / Support Email</label>
+                  <input
+                    type="email"
+                    value={merchantEmail}
+                    onChange={(e) => setMerchantEmail(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Business Phone</label>
+                  <input
+                    type="text"
+                    value={merchantPhone}
+                    onChange={(e) => setMerchantPhone(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-white"
+                  />
+                </div>
+                <div className="sm:col-span-3">
+                  <label className="block text-slate-400 mb-1">Registered Business Address</label>
+                  <input
+                    type="text"
+                    value={merchantAddress}
+                    onChange={(e) => setMerchantAddress(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-slate-950 border border-slate-800 rounded-lg p-4 space-y-3">
+              <h4 className="font-bold text-amber-400 uppercase tracking-wider text-[11px]">
+                2. Invoice Metadata &amp; Customer GST Information (Recipient)
+              </h4>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-slate-400 mb-1">Invoice Number *</label>
+                  <input
+                    type="text"
+                    required
+                    value={invoiceNumber}
+                    onChange={(e) => setInvoiceNumber(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">PO / Custom Reference</label>
+                  <input
+                    type="text"
+                    value={customReference}
+                    onChange={(e) => setCustomReference(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">GST Tax Split Mode</label>
+                  <select
+                    value={taxBreakdownMode}
+                    onChange={(e) => setTaxBreakdownMode(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white"
+                  >
+                    <option value="AUTO">Auto (Match State Prefix)</option>
+                    <option value="CGST_SGST">Intra-State (CGST 9% + SGST 9%)</option>
+                    <option value="IGST">Inter-State (IGST 18%)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Customer Full Name *</label>
+                  <input
+                    type="text"
+                    required
+                    value={customerName}
+                    onChange={(e) => setCustomerName(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Customer Company Name</label>
+                  <input
+                    type="text"
+                    value={customerCompany}
+                    onChange={(e) => setCustomerCompany(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Customer GSTIN (15-Digit)</label>
+                  <input
+                    type="text"
+                    maxLength={15}
+                    value={customerGstin}
+                    onChange={(e) => setCustomerGstin(e.target.value.toUpperCase())}
+                    placeholder="B2C / Optional 15-Digit GSTIN"
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-emerald-300 uppercase"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Customer Email</label>
+                  <input
+                    type="email"
+                    value={customerEmail}
+                    onChange={(e) => setCustomerEmail(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Customer Mobile</label>
+                  <input
+                    type="text"
+                    value={customerMobile}
+                    onChange={(e) => setCustomerMobile(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Customer Billing Address</label>
+                  <input
+                    type="text"
+                    value={customerAddress}
+                    onChange={(e) => setCustomerAddress(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-slate-950 border border-slate-800 rounded-lg p-4 space-y-3">
+              <h4 className="font-bold text-sky-400 uppercase tracking-wider text-[11px]">
+                3. Bank Settlement Details, Signatory &amp; Invoice Terms
+              </h4>
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-slate-400 mb-1">Bank Name</label>
+                  <input
+                    type="text"
+                    value={bankName}
+                    onChange={(e) => setBankName(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Account Number</label>
+                  <input
+                    type="text"
+                    value={bankAccountNumber}
+                    onChange={(e) => setBankAccountNumber(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">IFSC Code</label>
+                  <input
+                    type="text"
+                    value={bankIfscCode}
+                    onChange={(e) => setBankIfscCode(e.target.value.toUpperCase())}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-white uppercase"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Corporate UPI ID</label>
+                  <input
+                    type="text"
+                    value={bankUpiId}
+                    onChange={(e) => setBankUpiId(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-white"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block text-slate-400 mb-1">Authorized Signatory Title</label>
+                  <input
+                    type="text"
+                    value={authorizedSignatory}
+                    onChange={(e) => setAuthorizedSignatory(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block text-slate-400 mb-1">Invoice Declaration / Notes</label>
+                  <input
+                    type="text"
+                    value={invoiceNotes}
+                    onChange={(e) => setInvoiceNotes(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white"
+                  />
+                </div>
+              </div>
+              <label className="flex items-center gap-2 text-slate-300 cursor-pointer pt-1">
+                <input
+                  type="checkbox"
+                  checked={updateGlobalBusinessProfile}
+                  onChange={(e) => setUpdateGlobalBusinessProfile(e.target.checked)}
+                  className="rounded border-slate-700"
+                />
+                <span>
+                  Also save Business GSTIN &amp; Company Details as global default for all invoices
+                </span>
+              </label>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsEditingInvoice(false)}
+                className="px-4 py-2 text-xs font-medium bg-slate-800 text-slate-300 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={savingInvoice}
+                className="px-4 py-2 text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg"
+              >
+                {savingInvoice ? 'Saving Invoice...' : 'Save & Update GST Invoice'}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 text-xs bg-slate-950/70 border border-slate-800 rounded-xl p-4">
+              <div className="space-y-1">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                  Issued By (Supplier / Business Info)
+                </div>
+                <div className="font-bold text-white text-sm">{merchantLegalName}</div>
+                {merchantBrandName && (
+                  <div className="text-slate-300 text-[11px]">Brand: {merchantBrandName}</div>
+                )}
+                <div className="text-slate-400 leading-relaxed">{merchantAddress}</div>
+                <div className="text-emerald-400 font-mono font-semibold pt-1">
+                  Business GSTIN: {merchantGstin}
+                </div>
+                <div className="text-slate-400 font-mono text-[11px]">
+                  PAN: {merchantPan} · CIN: {merchantCin}
+                </div>
+                <div className="text-slate-400 font-mono text-[11px]">
+                  State Code: {merchantStateCode} · HSN/SAC: {hsnSacCode}
+                </div>
+                <div className="text-slate-400 text-[11px]">
+                  {merchantEmail} · {merchantPhone}
+                </div>
+              </div>
+
+              <div className="sm:text-right space-y-1">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                  Billed To (Customer / Recipient)
+                </div>
+                <div className="font-bold text-white text-sm">{customerName}</div>
+                {customerCompany && (
+                  <div className="text-slate-200 font-semibold">{customerCompany}</div>
+                )}
+                {customerAddress && (
+                  <div className="text-slate-400 leading-relaxed">{customerAddress}</div>
+                )}
+                <div className="text-slate-400">{customerEmail}</div>
+                <div className="text-slate-400 font-mono">{customerMobile}</div>
+                {customerGstin ? (
+                  <div className="text-emerald-400 font-mono font-semibold pt-1">
+                    Customer GSTIN: {customerGstin}
                   </div>
-                </td>
-                <td className="py-2.5 text-right font-mono">{item.quantity}</td>
-                <td className="py-2.5 text-right font-mono">{formatINR(item.unitPricePaise)}</td>
-                <td className="py-2.5 text-right font-mono text-slate-100">
-                  {formatINR(item.unitPricePaise * item.quantity)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                ) : (
+                  <div className="text-slate-500 font-mono text-[11px] pt-1">
+                    Customer GSTIN: Unregistered / B2C Consumer
+                  </div>
+                )}
+                <div className="text-slate-500 font-mono text-[11px]">
+                  Supply Type: {isIntraState ? 'Intra-State (CGST + SGST)' : 'Inter-State (IGST)'}
+                </div>
+              </div>
+            </div>
 
-        <div className="border-t border-slate-800 pt-4 space-y-1.5 text-xs max-w-xs ml-auto">
-          <div className="flex justify-between text-slate-400">
-            <span>Taxable Subtotal</span>
-            <span className="font-mono text-slate-200">{formatINR(order.subtotalPaise)}</span>
-          </div>
-          <div className="flex justify-between text-slate-400">
-            <span>IGST / CGST+SGST</span>
-            <span className="font-mono text-slate-200">{formatINR(order.taxAmountPaise)}</span>
-          </div>
-          {order.shippingChargesPaise > 0 && (
-            <div className="flex justify-between text-slate-400">
-              <span>Shipping &amp; Handling</span>
-              <span className="font-mono text-slate-200">
-                {formatINR(order.shippingChargesPaise)}
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="border-b border-slate-800 text-slate-400">
+                  <th className="py-2">Description &amp; SKU</th>
+                  <th className="py-2">HSN/SAC</th>
+                  <th className="py-2 text-right">Qty</th>
+                  <th className="py-2 text-right">Unit Price</th>
+                  <th className="py-2 text-right">GST %</th>
+                  <th className="py-2 text-right">Taxable Value</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60">
+                {initialItems.map((item: any, idx: number) => (
+                  <tr key={idx}>
+                    <td className="py-2.5">
+                      <div className="font-medium text-slate-100">{item.name}</div>
+                      <div className="text-[11px] font-mono text-slate-500">SKU: {item.sku}</div>
+                    </td>
+                    <td className="py-2.5 font-mono text-slate-300">
+                      {item.hsnSacCode || hsnSacCode}
+                    </td>
+                    <td className="py-2.5 text-right font-mono">{item.quantity}</td>
+                    <td className="py-2.5 text-right font-mono">
+                      {formatINR(item.unitPricePaise)}
+                    </td>
+                    <td className="py-2.5 text-right font-mono">{item.taxRatePercent ?? 18}%</td>
+                    <td className="py-2.5 text-right font-mono text-slate-100">
+                      {formatINR(item.unitPricePaise * item.quantity)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-6 border-t border-slate-800 pt-4 text-xs">
+              <div className="sm:col-span-7 space-y-2">
+                <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-1">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                    Business Bank &amp; Settlement Information
+                  </div>
+                  <div className="text-slate-200 font-medium">{bankName}</div>
+                  <div className="font-mono text-[11px] text-slate-300">
+                    A/C No: {bankAccountNumber} · IFSC: {bankIfscCode}
+                  </div>
+                  <div className="font-mono text-[11px] text-emerald-400">
+                    Corporate UPI: {bankUpiId}
+                  </div>
+                </div>
+                <div className="text-[11px] text-slate-400 leading-relaxed">
+                  <span className="font-semibold text-slate-300">Declaration &amp; Terms: </span>
+                  {invoiceNotes} {invoiceTerms}
+                </div>
+              </div>
+
+              <div className="sm:col-span-5 space-y-1.5">
+                <div className="flex justify-between text-slate-400">
+                  <span>Taxable Subtotal</span>
+                  <span className="font-mono text-slate-200">{formatINR(order.subtotalPaise)}</span>
+                </div>
+                {isIntraState ? (
+                  <>
+                    <div className="flex justify-between text-slate-400">
+                      <span>CGST (9%)</span>
+                      <span className="font-mono text-slate-200">{formatINR(cgstPaise)}</span>
+                    </div>
+                    <div className="flex justify-between text-slate-400">
+                      <span>SGST (9%)</span>
+                      <span className="font-mono text-slate-200">{formatINR(sgstPaise)}</span>
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex justify-between text-slate-400">
+                    <span>IGST (18%)</span>
+                    <span className="font-mono text-slate-200">
+                      {formatINR(order.taxAmountPaise)}
+                    </span>
+                  </div>
+                )}
+                {order.shippingChargesPaise > 0 && (
+                  <div className="flex justify-between text-slate-400">
+                    <span>Shipping &amp; Handling</span>
+                    <span className="font-mono text-slate-200">
+                      {formatINR(order.shippingChargesPaise)}
+                    </span>
+                  </div>
+                )}
+                {order.discountAmountPaise > 0 && (
+                  <div className="flex justify-between text-emerald-400">
+                    <span>Discount ({order.couponCode || 'Promo'})</span>
+                    <span className="font-mono">-{formatINR(order.discountAmountPaise)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-sm font-bold text-white border-t border-slate-800 pt-2">
+                  <span>Grand Invoice Total</span>
+                  <span className="font-mono text-emerald-400">
+                    {formatINR(order.totalAmountPaise)}
+                  </span>
+                </div>
+                <div className="pt-3 text-right">
+                  <div className="text-[11px] font-semibold text-slate-300">
+                    {authorizedSignatory}
+                  </div>
+                  <div className="text-[10px] text-slate-500 font-mono">
+                    Computer Generated Digital Tax Invoice
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="text-[11px] text-slate-500 flex items-center justify-between border-t border-slate-800 pt-3">
+              <span className="flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                Digitally signed GST Tax Invoice · Order {order.orderNumber}
               </span>
+              <span className="font-mono">Payment Status: {order.paymentStatus}</span>
             </div>
-          )}
-          {order.discountAmountPaise > 0 && (
-            <div className="flex justify-between text-emerald-400">
-              <span>Discount ({order.couponCode || 'Promo'})</span>
-              <span className="font-mono">-{formatINR(order.discountAmountPaise)}</span>
-            </div>
-          )}
-          <div className="flex justify-between text-sm font-bold text-white border-t border-slate-800 pt-2">
-            <span>Invoice Total</span>
-            <span className="font-mono text-emerald-400">{formatINR(order.totalAmountPaise)}</span>
-          </div>
-        </div>
-
-        <div className="text-[11px] text-slate-500 flex items-center justify-between border-t border-slate-800 pt-3">
-          <span className="flex items-center gap-1.5">
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-            Digitally signed invoice · Order {order.orderNumber}
-          </span>
-          <span className="font-mono">Payment Status: {order.paymentStatus}</span>
-        </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -712,6 +1305,20 @@ export const EditOrderModal: React.FC<{
   const [discountRupees, setDiscountRupees] = useState<string>(
     ((order.discountAmountPaise || 0) / 100).toFixed(2)
   );
+  const [merchantLegalName, setMerchantLegalName] = useState<string>(
+    parsedBilling.merchantLegalName || ''
+  );
+  const [merchantGstin, setMerchantGstin] = useState<string>(parsedBilling.merchantGstin || '');
+  const [merchantPan, setMerchantPan] = useState<string>(parsedBilling.merchantPan || '');
+  const [merchantStateCode, setMerchantStateCode] = useState<string>(
+    parsedBilling.merchantStateCode || ''
+  );
+  const [merchantAddress, setMerchantAddress] = useState<string>(
+    parsedBilling.merchantAddress || ''
+  );
+  const [merchantEmail, setMerchantEmail] = useState<string>(parsedBilling.merchantEmail || '');
+  const [merchantPhone, setMerchantPhone] = useState<string>(parsedBilling.merchantPhone || '');
+  const [hsnSacCode, setHsnSacCode] = useState<string>(parsedBilling.hsnSacCode || '998314');
 
   const [items, setItems] = useState<
     Array<{
@@ -732,8 +1339,8 @@ export const EditOrderModal: React.FC<{
     }
     return [
       {
-        sku: 'ALT-CUSTOM-01',
-        name: 'Enterprise Service Item',
+        sku: 'CUSTOM-01',
+        name: 'Order Line Item',
         description: 'Custom Order Line Item',
         quantity: 1,
         unitPricePaise: order.subtotalPaise || 100000,
@@ -773,9 +1380,9 @@ export const EditOrderModal: React.FC<{
       ...prev,
       {
         productId: p?.id,
-        sku: p?.sku || 'ALT-ITEM-NEW',
+        sku: p?.sku || `ITEM-${prev.length + 1}`,
         name: p?.name || 'Additional Service Line Item',
-        description: p?.description || 'Enterprise deployment item',
+        description: p?.description || 'Line item',
         quantity: 1,
         unitPricePaise: p?.unitPricePaise || 100000,
         taxRatePercent: p?.taxRatePercent ?? 18,
@@ -796,6 +1403,14 @@ export const EditOrderModal: React.FC<{
         line1: billingAddressLine.trim(),
         gstin: customerGstin.trim().toUpperCase() || undefined,
         companyName: companyName.trim() || undefined,
+        merchantLegalName: merchantLegalName.trim(),
+        merchantGstin: merchantGstin.trim().toUpperCase(),
+        merchantPan: merchantPan.trim().toUpperCase(),
+        merchantStateCode: merchantStateCode.trim(),
+        merchantAddress: merchantAddress.trim(),
+        merchantEmail: merchantEmail.trim(),
+        merchantPhone: merchantPhone.trim(),
+        hsnSacCode: hsnSacCode.trim(),
       });
 
       const res = await fetch(`/api/v1/orders/${order.id}`, {
@@ -809,6 +1424,14 @@ export const EditOrderModal: React.FC<{
           companyName: companyName.trim(),
           billingAddress: updatedBillingJson,
           shippingAddress: shippingAddressLine.trim() || updatedBillingJson,
+          merchantLegalName: merchantLegalName.trim(),
+          merchantGstin: merchantGstin.trim().toUpperCase(),
+          merchantPan: merchantPan.trim().toUpperCase(),
+          merchantStateCode: merchantStateCode.trim(),
+          merchantAddress: merchantAddress.trim(),
+          merchantEmail: merchantEmail.trim(),
+          merchantPhone: merchantPhone.trim(),
+          hsnSacCode: hsnSacCode.trim(),
           customReference: customReference.trim(),
           invoiceNumber: invoiceNumber.trim(),
           isPrivateLinkOrder,
@@ -909,7 +1532,7 @@ export const EditOrderModal: React.FC<{
                 maxLength={15}
                 value={customerGstin}
                 onChange={(e) => setCustomerGstin(e.target.value.toUpperCase())}
-                placeholder="29ABCDE1234F1Z5"
+                placeholder="15-character GSTIN"
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-emerald-300 uppercase"
               />
             </div>
@@ -919,7 +1542,7 @@ export const EditOrderModal: React.FC<{
                 type="text"
                 value={companyName}
                 onChange={(e) => setCompanyName(e.target.value)}
-                placeholder="Enterprise Pvt Ltd"
+                placeholder="Customer company name"
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-100"
               />
             </div>
@@ -954,6 +1577,89 @@ export const EditOrderModal: React.FC<{
                 onChange={(e) => setShippingAddressLine(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-100"
               />
+            </div>
+          </div>
+
+          {/* Business & Supplier GST Info Section */}
+          <div className="bg-slate-950/70 border border-slate-800 rounded-lg p-3.5 space-y-3">
+            <div className="text-xs font-semibold text-emerald-300">
+              Business &amp; Supplier Info on Order Invoice
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">Business Legal Name</label>
+                <input
+                  type="text"
+                  value={merchantLegalName}
+                  onChange={(e) => setMerchantLegalName(e.target.value)}
+                  placeholder="Business Legal Name"
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-slate-100"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">Business GSTIN</label>
+                <input
+                  type="text"
+                  maxLength={15}
+                  value={merchantGstin}
+                  onChange={(e) => setMerchantGstin(e.target.value.toUpperCase())}
+                  placeholder="15-character GSTIN"
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-emerald-300 uppercase"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">Business PAN</label>
+                <input
+                  type="text"
+                  maxLength={10}
+                  value={merchantPan}
+                  onChange={(e) => setMerchantPan(e.target.value.toUpperCase())}
+                  placeholder="10-character PAN"
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-slate-100 uppercase"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">State Code</label>
+                <input
+                  type="text"
+                  value={merchantStateCode}
+                  onChange={(e) => setMerchantStateCode(e.target.value)}
+                  placeholder="e.g. 27 (Maharashtra)"
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-slate-100"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">HSN / SAC Code</label>
+                <input
+                  type="text"
+                  value={hsnSacCode}
+                  onChange={(e) => setHsnSacCode(e.target.value)}
+                  placeholder="998314"
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-slate-100"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-slate-400 mb-1">Business Email / Phone</label>
+                <input
+                  type="text"
+                  value={merchantEmail || merchantPhone}
+                  onChange={(e) => setMerchantEmail(e.target.value)}
+                  placeholder="billing@yourdomain.com"
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-slate-100"
+                />
+              </div>
+              <div className="sm:col-span-3">
+                <label className="block text-[11px] text-slate-400 mb-1">
+                  Business Registered Address
+                </label>
+                <input
+                  type="text"
+                  value={merchantAddress}
+                  onChange={(e) => setMerchantAddress(e.target.value)}
+                  placeholder="Business Registered Office Address"
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-slate-100"
+                />
+              </div>
             </div>
           </div>
 
@@ -1175,7 +1881,7 @@ export const EditOrderModal: React.FC<{
                 type="text"
                 value={shippingTrackingNumber}
                 onChange={(e) => setShippingTrackingNumber(e.target.value)}
-                placeholder="BLUEDART-881209"
+                placeholder="Enter tracking number"
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 font-mono text-slate-100"
               />
             </div>

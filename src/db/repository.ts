@@ -22,6 +22,11 @@ import {
 } from './schema.ts';
 import { PayUIndiaAdapter } from '../services/gateways/payu.adapter.ts';
 import { ZohoPaymentsAdapter } from '../services/gateways/zoho.adapter.ts';
+import {
+  PayGlocalAdapter,
+  PayGlocalConfig,
+  normalizePemString,
+} from '../services/gateways/payglocal.adapter.ts';
 import { WebhookService } from '../services/webhook.service.ts';
 import { NotificationService } from '../services/notification.service.ts';
 import { XPERISERV_POLICY_VERSION } from '../data/xperiservPolicies.ts';
@@ -29,6 +34,68 @@ import { XPERISERV_POLICY_VERSION } from '../data/xperiservPolicies.ts';
 let isSchemaBootstrapped = false;
 let isSeeded = false;
 let isPrivateLinksSeeded = false;
+
+const LEGACY_TEST_VALUES: Record<string, string[]> = {
+  merchantGstin: ['29AABCA8921K1Z5'],
+  panNumber: ['AABCA8921K'],
+  cinNumber: ['U72900KA2024PTC182910'],
+  stateCode: ['29 (Karnataka)'],
+  registeredAddress: [
+    'Allientic Tech Park, Outer Ring Road, Bellandur, Bengaluru, Karnataka - 560103, India',
+  ],
+  corporateOfficeAddress: ['Plot 42, Sector 6, CDA, Cuttack, Odisha - 753014, India'],
+  supportPhone: ['+91 98112 00100'],
+  bankName: ['HDFC Bank Ltd. — Enterprise Corporate Branch'],
+  bankAccountNumber: ['50200089142310'],
+  bankIfscCode: ['HDFC0001209'],
+  bankUpiId: ['allientic@hdfcbank'],
+  invoiceFooterNotes: [
+    'Tax is payable on forward charge basis. All disputes are subject to exclusive jurisdiction of courts in Bengaluru / Cuttack.',
+  ],
+};
+
+export function sanitizeLegacyMerchantTaxConfig(cfg: Record<string, any> | null | undefined) {
+  const cleaned: Record<string, any> = { ...(cfg || {}) };
+  for (const [key, testVals] of Object.entries(LEGACY_TEST_VALUES)) {
+    const val = String(cleaned[key] || '').trim();
+    if (testVals.includes(val)) {
+      cleaned[key] = '';
+    }
+  }
+  return cleaned;
+}
+
+export function resolvePayGlocalCredentials(gateway: any): PayGlocalConfig {
+  let ruleObj: Record<string, any> = {};
+  try {
+    ruleObj = JSON.parse(gateway?.routingRuleJson || '{}') || {};
+  } catch {
+    ruleObj = {};
+  }
+  const rawPrivatePem = String(
+    gateway?.encryptedSecretOrSalt || process.env.PAYGLOCAL_PRIVATE_KEY || ''
+  ).replace(/^enc_aes256_/, '');
+  const rawPublicPem = String(
+    ruleObj.payglocalPublicKeyPem || process.env.PAYGLOCAL_PUBLIC_KEY_PEM || ''
+  );
+
+  const publicKeyId = String(
+    ruleObj.publicKeyId || gateway?.publicKeyOrClientId || process.env.PAYGLOCAL_PUBLIC_KEY_ID || ''
+  ).trim();
+  const privateKeyId = String(
+    ruleObj.privateKeyId || gateway?.publicKeyOrClientId || process.env.PAYGLOCAL_PRIVATE_KEY_ID || ''
+  ).trim();
+
+  return {
+    environment: ((gateway?.environment as 'SANDBOX' | 'PRODUCTION') || 'PRODUCTION'),
+    merchantId: String(gateway?.merchantId || process.env.PAYGLOCAL_MERCHANT_ID || '').trim(),
+    privateKeyId,
+    publicKeyId,
+    merchantPrivateKeyPem: normalizePemString(rawPrivatePem, 'PRIVATE'),
+    payglocalPublicKeyPem: normalizePemString(rawPublicPem, 'PUBLIC'),
+    webhookSecret: String(gateway?.webhookSecret || process.env.PAYGLOCAL_WEBHOOK_SECRET || '').trim(),
+  };
+}
 
 export function resolvePayUCredentials(gateway: any): {
   environment: 'SANDBOX' | 'PRODUCTION';
@@ -144,8 +211,32 @@ export async function ensureSeeded() {
       .select()
       .from(products)
       .where(eq(products.sku, 'ALT-PRV-GOV-01'));
-    if (legacySeedCheck.length > 0 || legacyPrivCheck.length > 0) {
+    const legacyOrderCheck = await db
+      .select()
+      .from(orders)
+      .where(eq(orders.orderNumber, 'ALT-ORD-2026-1001'));
+    if (legacySeedCheck.length > 0 || legacyPrivCheck.length > 0 || legacyOrderCheck.length > 0) {
       await purgeAllTestData();
+    }
+
+    // Sanitize any persisted legacy screenshot dummy tax values while preserving user-entered business info
+    try {
+      const taxRows = await db
+        .select()
+        .from(systemSettings)
+        .where(eq(systemSettings.settingKey, 'merchant_tax_config'));
+      if (taxRows[0]) {
+        const parsedTax = JSON.parse(taxRows[0].settingValueJson || '{}');
+        const cleanedTax = sanitizeLegacyMerchantTaxConfig(parsedTax);
+        if (JSON.stringify(parsedTax) !== JSON.stringify(cleanedTax)) {
+          await db
+            .update(systemSettings)
+            .set({ settingValueJson: JSON.stringify(cleanedTax), updatedAt: new Date() })
+            .where(eq(systemSettings.id, taxRows[0].id));
+        }
+      }
+    } catch {
+      // ignore optional cleanup error
     }
 
     // 1. Ensure Production Payment Gateways (PayU India, Zoho Payments & PayPal)
@@ -415,14 +506,27 @@ export async function getPlatformSnapshot() {
       db.select().from(systemSettings),
     ]);
 
-    // Provide clean secretOrSalt and webhookSecret values so Admin Portal can inspect/show and save keys without stale placeholder overwrites
+    // Provide clean secretOrSalt, webhookSecret, and PayGlocal PEM/KeyID values for Admin Portal inspection & editing
     const sanitizedGateways = allGateways.map((gw) => {
       const rawSecret = (gw.encryptedSecretOrSalt || '').replace(/^enc_aes256_/, '').trim();
       const rawWebhook = (gw.webhookSecret || '').trim();
+      let ruleObj: Record<string, any> = {};
+      try {
+        ruleObj = JSON.parse(gw.routingRuleJson || '{}') || {};
+      } catch {
+        ruleObj = {};
+      }
+      const payglocalPublicKeyPem = String(ruleObj.payglocalPublicKeyPem || '').trim();
+      const privateKeyId = String(ruleObj.privateKeyId || gw.publicKeyOrClientId || '').trim();
+      const publicKeyId = String(ruleObj.publicKeyId || gw.publicKeyOrClientId || '').trim();
       return {
         ...gw,
         secretOrSalt: rawSecret,
         webhookSecret: rawWebhook,
+        privateKeyId,
+        publicKeyId,
+        payglocalPublicKeyPem,
+        hasPayGlocalPublicKeyPem: Boolean(payglocalPublicKeyPem.length > 0),
         hasSecretConfigured: Boolean(rawSecret.length > 0),
         hasWebhookSecretConfigured: Boolean(rawWebhook.length > 0),
         encryptedSecretOrSalt: rawSecret ? '••••••••••••••••••••••••' : '',
@@ -434,6 +538,47 @@ export async function getPlatformSnapshot() {
     const privateProducts = allProducts.filter((p) => p.isPrivate);
 
     const platformSettingRow = allSettings.find((s) => s.settingKey === 'platform_config') || allSettings[0];
+    const merchantTaxSettingRow = allSettings.find((s) => s.settingKey === 'merchant_tax_config');
+    let savedMerchantTaxConfig: any = null;
+    if (merchantTaxSettingRow) {
+      try {
+        savedMerchantTaxConfig = sanitizeLegacyMerchantTaxConfig(
+          JSON.parse(merchantTaxSettingRow.settingValueJson)
+        );
+      } catch {
+        savedMerchantTaxConfig = null;
+      }
+    }
+    const defaultMerchantTaxConfig = {
+      merchantGstin: '',
+      legalEntityName: '',
+      brandName: '',
+      panNumber: '',
+      cinNumber: '',
+      stateCode: '',
+      defaultHsnSac: '998314',
+      defaultGstPercent: 18,
+      taxBreakdownMode: 'AUTO',
+      registeredAddress: '',
+      corporateOfficeAddress: '',
+      supportEmail: '',
+      supportPhone: '',
+      websiteUrl: 'https://checkout.xperiserv.in',
+      invoicePrefix: 'INV-',
+      bankName: '',
+      bankAccountName: '',
+      bankAccountNumber: '',
+      bankIfscCode: '',
+      bankUpiId: '',
+      authorizedSignatory: '',
+      invoiceFooterNotes: '',
+      invoiceTerms: '',
+    };
+    const mergedMerchantTaxConfig = {
+      ...defaultMerchantTaxConfig,
+      ...(savedMerchantTaxConfig || {}),
+    };
+
     const mailgunSettingRow = allSettings.find((s) => s.settingKey === 'mailgun_smtp_config');
     let savedMailgunConfig: any = null;
     if (mailgunSettingRow) {
@@ -484,6 +629,7 @@ export async function getPlatformSnapshot() {
       teamMembers: allUsers,
       auditLogs: allAuditLogs,
       settings: platformSettingRow ? JSON.parse(platformSettingRow.settingValueJson) : {},
+      merchantTaxConfig: mergedMerchantTaxConfig,
       mailgunConfig: savedMailgunConfig || {
         smtpHost: process.env.SMTP_HOST || 'smtp.mailgun.org',
         smtpPort: process.env.SMTP_PORT || '587',
@@ -534,6 +680,36 @@ export async function createOrderAndCheckoutSession(input: {
   try {
     await ensureSeeded();
 
+    // Load active Merchant GST & Business Config
+    let activeMerchantTax: Record<string, any> = {
+      merchantGstin: '',
+      legalEntityName: '',
+      brandName: '',
+      panNumber: '',
+      cinNumber: '',
+      stateCode: '',
+      defaultHsnSac: '998314',
+      registeredAddress: '',
+      supportEmail: '',
+      supportPhone: '',
+      websiteUrl: 'https://checkout.xperiserv.in',
+      invoicePrefix: 'INV-',
+    };
+    try {
+      const taxRows = await db
+        .select()
+        .from(systemSettings)
+        .where(eq(systemSettings.settingKey, 'merchant_tax_config'));
+      if (taxRows[0]) {
+        activeMerchantTax = {
+          ...activeMerchantTax,
+          ...sanitizeLegacyMerchantTaxConfig(JSON.parse(taxRows[0].settingValueJson)),
+        };
+      }
+    } catch {
+      // keep clean defaults
+    }
+
     // Calculate subtotal, tax, shipping, and discount
     let subtotalPaise = 0;
     let taxAmountPaise = 0;
@@ -570,14 +746,8 @@ export async function createOrderAndCheckoutSession(input: {
       subtotalPaise + taxAmountPaise + shippingChargesPaise - discountAmountPaise
     );
 
-    // Parse or enrich billingAddress JSON with GSTIN, Company Name, IP, and Multi-Currency info
-    let enrichedBillingObj: Record<string, any> = {
-      line1: 'Enterprise Billing Desk',
-      city: 'Bengaluru',
-      state: 'Karnataka',
-      postalCode: '560103',
-      country: 'India',
-    };
+    // Parse or enrich billingAddress JSON with GSTIN, Company Name, and Merchant Business Info
+    let enrichedBillingObj: Record<string, any> = {};
     if (input.billingAddress) {
       try {
         const parsed = JSON.parse(input.billingAddress);
@@ -594,7 +764,35 @@ export async function createOrderAndCheckoutSession(input: {
     const cleanCompany = (input.companyName || enrichedBillingObj.companyName || '').toString().trim();
     if (cleanGstin) enrichedBillingObj.gstin = cleanGstin;
     if (cleanCompany) enrichedBillingObj.companyName = cleanCompany;
-    enrichedBillingObj.merchantGstin = enrichedBillingObj.merchantGstin || '29AABCA8921K1Z5';
+    if (activeMerchantTax.merchantGstin && !enrichedBillingObj.merchantGstin) {
+      enrichedBillingObj.merchantGstin = activeMerchantTax.merchantGstin;
+    }
+    if (activeMerchantTax.legalEntityName && !enrichedBillingObj.merchantLegalName) {
+      enrichedBillingObj.merchantLegalName = activeMerchantTax.legalEntityName;
+    }
+    if (activeMerchantTax.brandName && !enrichedBillingObj.merchantBrandName) {
+      enrichedBillingObj.merchantBrandName = activeMerchantTax.brandName;
+    }
+    if (activeMerchantTax.panNumber && !enrichedBillingObj.merchantPan) {
+      enrichedBillingObj.merchantPan = activeMerchantTax.panNumber;
+    }
+    if (activeMerchantTax.cinNumber && !enrichedBillingObj.merchantCin) {
+      enrichedBillingObj.merchantCin = activeMerchantTax.cinNumber;
+    }
+    if (activeMerchantTax.stateCode && !enrichedBillingObj.merchantStateCode) {
+      enrichedBillingObj.merchantStateCode = activeMerchantTax.stateCode;
+    }
+    if (activeMerchantTax.registeredAddress && !enrichedBillingObj.merchantAddress) {
+      enrichedBillingObj.merchantAddress = activeMerchantTax.registeredAddress;
+    }
+    if (activeMerchantTax.supportEmail && !enrichedBillingObj.merchantEmail) {
+      enrichedBillingObj.merchantEmail = activeMerchantTax.supportEmail;
+    }
+    if (activeMerchantTax.supportPhone && !enrichedBillingObj.merchantPhone) {
+      enrichedBillingObj.merchantPhone = activeMerchantTax.supportPhone;
+    }
+    enrichedBillingObj.hsnSacCode =
+      enrichedBillingObj.hsnSacCode || activeMerchantTax.defaultHsnSac || '998314';
 
     const serializedBilling = JSON.stringify(enrichedBillingObj);
 
@@ -638,8 +836,9 @@ export async function createOrderAndCheckoutSession(input: {
       customerId = insertedCust[0].id;
     }
 
-    const orderNumber = `ALT-ORD-2026-${Math.floor(1004 + Math.random() * 8995)}`;
-    const invoiceNumber = `INV-ALT-2026-${Math.floor(1000 + Math.random() * 8999)}`;
+    const orderNumber = `ORD-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 8999)}`;
+    const invPrefix = String(activeMerchantTax.invoicePrefix || 'INV-').trim();
+    const invoiceNumber = `${invPrefix}${Math.floor(1000 + Math.random() * 8999)}`;
     const sessionToken = `cs_live_${crypto.randomBytes(8).toString('hex')}`;
     const policyVersion = input.acceptedPolicyVersion || XPERISERV_POLICY_VERSION;
 
@@ -1102,45 +1301,143 @@ export async function processCheckoutPayment(input: {
         signatureVerified,
       };
     } else if (input.gatewayCode === 'PAYGLOCAL') {
-      const pgMerchantId =
-        gateway.merchantId || process.env.PAYGLOCAL_MERCHANT_ID || 'PAYGLOCAL_MERCHANT_LIVE';
-      const pgPublicKeyId =
-        gateway.publicKeyOrClientId || process.env.PAYGLOCAL_PUBLIC_KEY_ID || 'PAYGLOCAL_KID_LIVE';
-      const pgPrivateKey =
-        rawSavedSecret || process.env.PAYGLOCAL_PRIVATE_KEY || 'PAYGLOCAL_PRIVATE_JWS_KEY';
-      const pgWebhookSecret =
-        gateway.webhookSecret || process.env.PAYGLOCAL_WEBHOOK_SECRET || 'WH-PAYGLOCAL-LIVE';
+      const pgConfig = resolvePayGlocalCredentials(gateway);
 
+      if (!input.forceSimulate) {
+        if (!pgConfig.merchantId || !pgConfig.merchantPrivateKeyPem || (!pgConfig.privateKeyId && !pgConfig.publicKeyId)) {
+          throw new Error(
+            'PayGlocal Merchant ID, Key ID (x-gl-kid / kid), and Merchant Private Key (.pem) are required. Upload your .pem key files in Admin Portal → 8. Payment Gateways.'
+          );
+        }
+
+        const callbackUrl = `${baseUrl}/api/v1/callbacks/payglocal`;
+        const billingParsed = (() => {
+          try {
+            return JSON.parse(input.billingAddress || order.billingAddress || '{}') || {};
+          } catch {
+            return {};
+          }
+        })();
+
+        const initResult = await PayGlocalAdapter.initiatePayCollect(
+          {
+            merchantTxnId: txnid,
+            totalAmount: amountRupeesStr,
+            txnCurrency: (billingParsed.displayCurrency || order.currency || 'INR').toUpperCase(),
+            merchantCallbackURL: callbackUrl,
+            customerFirstName: finalCustomerName,
+            customerEmail: finalCustomerEmail,
+            customerPhone: finalCustomerMobile,
+            billingStreet: billingParsed.line1,
+            billingCity: billingParsed.city,
+            billingState: billingParsed.state,
+            billingPostalCode: billingParsed.postalCode,
+            billingCountry: billingParsed.detectedCountry || 'IN',
+            merchantUniqueId: order.orderNumber,
+          },
+          pgConfig
+        );
+
+        const insertedPendingPayment = await db
+          .insert(payments)
+          .values({
+            transactionId: txnid,
+            orderId: order.id,
+            checkoutSessionId: session.id,
+            customerId: order.customerId,
+            gatewayCode: 'PAYGLOCAL',
+            gatewayTransactionId: initResult.gid || null,
+            gatewayReferenceId: null,
+            paymentMethod: resolvedMethod,
+            paymentInstrumentDetail: resolvedInstrument,
+            amountPaise: order.totalAmountPaise,
+            refundedAmountPaise: 0,
+            currency: order.currency,
+            status: 'Pending',
+            signatureVerified: false,
+            requestHash: initResult.jwsToken,
+            responseHash: null,
+            errorCode: null,
+            errorMessage: null,
+            idempotencyKey: `idem_${txnid}`,
+            settlementStatus: 'Unsettled',
+            rawGatewayLogJson: JSON.stringify({
+              gateway: 'PAYGLOCAL',
+              environment: pgConfig.environment,
+              endpoint: initResult.endpoint,
+              gid: initResult.gid,
+              status: initResult.status,
+              redirectUrl: initResult.redirectUrl,
+              txnid,
+            }),
+          })
+          .returning();
+
+        const currentTimeline = JSON.parse(order.timelineJson || '[]');
+        currentTimeline.push({
+          timestamp: new Date().toISOString(),
+          actor: 'PayGlocal Gateway Initiator',
+          action: 'Redirected to PayGlocal PayCollect Checkout',
+          status: 'Payment Initiated',
+          note: `${txnid} (GID: ${initResult.gid || 'Pending'}) initiated on ${initResult.endpoint} (${pgConfig.environment}) — awaiting customer completion & x-gl-token callback`,
+        });
+
+        const updatedPendingOrder = await db
+          .update(orders)
+          .set({
+            customerName: finalCustomerName,
+            customerEmail: finalCustomerEmail,
+            customerMobile: finalCustomerMobile,
+            billingAddress: input.billingAddress || order.billingAddress,
+            shippingAddress: input.shippingAddress || order.shippingAddress,
+            orderStatus: 'Payment Initiated',
+            paymentStatus: 'Pending',
+            acceptedPolicyVersion: finalPolicyVersion,
+            acceptedPolicyTimestamp: new Date(),
+            timelineJson: JSON.stringify(currentTimeline),
+            updatedAt: new Date(),
+          })
+          .where(eq(orders.id, order.id))
+          .returning();
+
+        const updatedPendingSession = await db
+          .update(checkoutSessions)
+          .set({
+            status: 'Processing',
+            selectedGateway: 'PAYGLOCAL',
+          })
+          .where(eq(checkoutSessions.id, session.id))
+          .returning();
+
+        return {
+          redirectRequired: true,
+          gateway: 'PAYGLOCAL',
+          environment: pgConfig.environment,
+          redirectUrl: initResult.redirectUrl,
+          gid: initResult.gid,
+          payment: insertedPendingPayment[0],
+          order: updatedPendingOrder[0],
+          checkoutSession: updatedPendingSession[0],
+        };
+      }
+
+      // Admin diagnostic mode only (forceSimulate: true)
       gatewayTransactionId = `GL_GID_${crypto.randomBytes(6).toString('hex').toUpperCase()}`;
       gatewayReferenceId = `PGL-${Date.now().toString(36).toUpperCase()}`;
-
       const jweInitiatePayload = JSON.stringify({
         merchantTxnId: txnid,
         merchantUniqueId: order.orderNumber,
         totalAmount: amountRupeesStr,
         txnCurrency: order.currency || 'INR',
-        merchantCallbackURL: `https://checkout.xperiserv.in/api/v1/webhooks/payglocal`,
+        merchantCallbackURL: `${baseUrl}/api/v1/callbacks/payglocal`,
       });
       requestHash = crypto
-        .createHmac('sha256', `${pgMerchantId}:${pgPublicKeyId}:${pgPrivateKey}`)
+        .createHash('sha256')
         .update(jweInitiatePayload)
         .digest('hex');
-
-      const xGlTokenCallbackPayload = JSON.stringify({
-        gid: gatewayTransactionId,
-        merchantTxnId: txnid,
-        status:
-          outcome === 'SUCCESS'
-            ? 'SENT_FOR_CAPTURE'
-            : outcome === 'PENDING'
-              ? 'INTERIM'
-              : 'GARNISHED_DECLINED',
-        totalAmount: amountRupeesStr,
-        txnCurrency: order.currency || 'INR',
-      });
       responseHash = crypto
-        .createHmac('sha256', `${pgPrivateKey}:${pgWebhookSecret}`)
-        .update(xGlTokenCallbackPayload)
+        .createHash('sha256')
+        .update(`${gatewayTransactionId}:${txnid}:${outcome}`)
         .digest('hex');
       signatureVerified = true;
 
@@ -1150,8 +1447,7 @@ export async function processCheckoutPayment(input: {
         gid: gatewayTransactionId,
         merchantTxnId: txnid,
         referenceId: gatewayReferenceId,
-        protocol: 'JWE/JWS (x-gl-token / x-gl-auth)',
-        pricingReference: 'https://payglocal.in/pricing',
+        protocol: 'JWE/JWS (x-gl-token)',
         signatureVerified,
       };
     } else {
@@ -1441,18 +1737,27 @@ export async function initiateRefund(input: {
     const refundType = input.amountPaise === payment.amountPaise ? 'FULL' : 'PARTIAL';
 
     let gatewayRefundId = '';
+    const gwRows = await db
+      .select()
+      .from(paymentGateways)
+      .where(eq(paymentGateways.code, payment.gatewayCode));
+    const gw = gwRows[0];
+    const savedGwSecret = (gw?.encryptedSecretOrSalt || '').replace(/^enc_aes256_/, '').trim();
+
     if (payment.gatewayCode === 'PAYU') {
+      const resolvedPayu = resolvePayUCredentials(gw);
+      if (!resolvedPayu.merchantKey || !resolvedPayu.merchantSalt) {
+        throw new Error('PayU credentials are not configured for refund processing.');
+      }
       const cmd = PayUIndiaAdapter.buildRefundCommand(
         payment.gatewayTransactionId || payment.transactionId,
         refundReferenceId,
         (input.amountPaise / 100).toFixed(2),
-        {
-          environment: 'SANDBOX',
-          merchantKey: process.env.PAYU_MERCHANT_KEY || 'gtKFFx',
-          merchantSalt: process.env.PAYU_MERCHANT_SALT || '4R38IvwiV57FwVpsgOvTXBdLE4tHUXFW',
-        }
+        resolvedPayu
       );
       gatewayRefundId = cmd.gatewayRefundId;
+    } else if (payment.gatewayCode === 'PAYGLOCAL') {
+      gatewayRefundId = `PGL-RFD-${Date.now().toString(36).toUpperCase()}`;
     } else {
       const zohoCmd = ZohoPaymentsAdapter.buildRefundPayload(
         payment.gatewayTransactionId || payment.transactionId,
@@ -1460,11 +1765,11 @@ export async function initiateRefund(input: {
         input.reason,
         refundReferenceId,
         {
-          environment: 'SANDBOX',
-          accountId: 'ZOHO-ACCT-60029184',
-          clientId: '1000.ALLIENTIC8921X',
-          clientSecret: 'zoho_secret',
-          webhookSecret: 'whsec_zoho',
+          environment: (gw?.environment as 'SANDBOX' | 'PRODUCTION') || 'PRODUCTION',
+          accountId: gw?.merchantId || process.env.ZOHO_ACCOUNT_ID || '',
+          clientId: gw?.publicKeyOrClientId || process.env.ZOHO_OAUTH_CLIENT_ID || '',
+          clientSecret: savedGwSecret || process.env.ZOHO_OAUTH_CLIENT_SECRET || '',
+          webhookSecret: gw?.webhookSecret || process.env.ZOHO_WEBHOOK_SECRET || '',
         }
       );
       gatewayRefundId = zohoCmd.gatewayRefundId;
@@ -1829,6 +2134,274 @@ export async function handlePayUCallback(rawPayload: Record<string, any>) {
   return {
     verified: signatureVerified,
     status: isSuccess ? 'success' : 'failure',
+    payment: updatedPayment[0],
+    order: updatedOrder[0],
+    checkoutSession: updatedSession,
+    redirectPath,
+  };
+}
+
+export async function handlePayGlocalCallback(
+  rawPayload: Record<string, any>,
+  headers: Record<string, any> = {}
+) {
+  await ensureSeeded();
+  const gateways = await db
+    .select()
+    .from(paymentGateways)
+    .where(eq(paymentGateways.code, 'PAYGLOCAL'));
+  const gateway = gateways[0];
+  const pgConfig = resolvePayGlocalCredentials(gateway);
+
+  const xGlToken = String(
+    rawPayload['x-gl-token'] ||
+      rawPayload.token ||
+      headers['x-gl-token'] ||
+      headers['x-gl-token-external'] ||
+      ''
+  ).trim();
+
+  let tokenClaims: Record<string, any> = {};
+  let tokenSignatureVerified = false;
+  if (xGlToken) {
+    const decoded = await PayGlocalAdapter.verifyOrDecodeCallbackToken(
+      xGlToken,
+      pgConfig.payglocalPublicKeyPem
+    );
+    tokenSignatureVerified = decoded.verified;
+    tokenClaims = decoded.payload || {};
+  }
+
+  let gid = String(
+    tokenClaims.gid || rawPayload.gid || rawPayload.glId || ''
+  ).trim();
+  let txnid = String(
+    tokenClaims.merchantTxnId || rawPayload.merchantTxnId || rawPayload.txnid || ''
+  ).trim();
+  let pgStatus = String(
+    tokenClaims.status || rawPayload.status || ''
+  )
+    .trim()
+    .toUpperCase();
+
+  // Locate internal payment record by txnid or gid
+  const allPayRows = await db.select().from(payments);
+  const payment =
+    (txnid ? allPayRows.find((p) => p.transactionId === txnid) : undefined) ||
+    (gid ? allPayRows.find((p) => p.gatewayTransactionId === gid) : undefined);
+
+  if (!payment) {
+    throw new Error(`PayGlocal payment transaction (${txnid || gid || 'unknown'}) not found.`);
+  }
+  txnid = payment.transactionId;
+  gid = gid || payment.gatewayTransactionId || '';
+
+  // Double-verify live status against PayGlocal Status API when gid & private key exist
+  let statusApiPayload: Record<string, any> | null = null;
+  if (gid && pgConfig.merchantId && pgConfig.merchantPrivateKeyPem && (pgConfig.privateKeyId || pgConfig.publicKeyId)) {
+    try {
+      statusApiPayload = await PayGlocalAdapter.fetchPaymentStatus(gid, pgConfig);
+      const apiStatus = String(
+        statusApiPayload?.data?.status || statusApiPayload?.status || ''
+      )
+        .trim()
+        .toUpperCase();
+      if (apiStatus) {
+        pgStatus = apiStatus;
+        tokenSignatureVerified = true;
+      }
+    } catch {
+      // keep JWT status if status query fails transiently
+    }
+  }
+
+  const foundOrders = await db.select().from(orders).where(eq(orders.id, payment.orderId));
+  const order = foundOrders[0];
+  if (!order) {
+    throw new Error(`Order for PayGlocal payment ${txnid} not found.`);
+  }
+
+  const foundSessions = payment.checkoutSessionId
+    ? await db
+        .select()
+        .from(checkoutSessions)
+        .where(eq(checkoutSessions.id, payment.checkoutSessionId))
+    : [];
+  const session = foundSessions[0] || null;
+
+  const successStatuses = new Set([
+    'SENT_FOR_CAPTURE',
+    'CAPTURED',
+    'SUCCESS',
+    'COMPLETED',
+    'SETTLED',
+    'AUTHORIZED',
+  ]);
+  const pendingStatuses = new Set(['INITIATED', 'INTERIM', 'PENDING', 'IN_PROGRESS']);
+
+  const isSuccess = successStatuses.has(pgStatus);
+  const isPending = !isSuccess && pendingStatuses.has(pgStatus);
+
+  const linkToken = order.paymentLinkToken || '';
+  const sessionToken = session?.sessionToken || 'public_storefront';
+  const redirectPath = linkToken
+    ? `/pay/${encodeURIComponent(linkToken)}?payglocal_txnid=${encodeURIComponent(txnid)}&payglocal_status=${isSuccess ? 'success' : isPending ? 'pending' : 'failure'}`
+    : `/checkout/${encodeURIComponent(sessionToken)}?payglocal_txnid=${encodeURIComponent(txnid)}&payglocal_status=${isSuccess ? 'success' : isPending ? 'pending' : 'failure'}`;
+
+  if (payment.status === 'Captured') {
+    return {
+      verified: true,
+      status: 'success',
+      payment,
+      order,
+      checkoutSession: session,
+      redirectPath,
+    };
+  }
+
+  const nextPaymentStatus = isSuccess ? 'Captured' : isPending ? 'Pending' : 'Failed';
+  const nextOrderStatus = isSuccess
+    ? 'Paid'
+    : isPending
+    ? 'Payment Initiated'
+    : 'Payment Failed';
+  const nextSessionStatus = isSuccess
+    ? 'Completed'
+    : isPending
+    ? 'Processing'
+    : 'Open';
+
+  const errorMessage =
+    isSuccess || isPending
+      ? null
+      : `PayGlocal returned status "${pgStatus || 'FAILED'}"`;
+
+  const updatedPayment = await db
+    .update(payments)
+    .set({
+      gatewayTransactionId: gid || payment.gatewayTransactionId,
+      gatewayReferenceId: String(
+        tokenClaims.paymentMethod || statusApiPayload?.data?.paymentMethod || 'PAYGLOCAL'
+      ),
+      status: nextPaymentStatus,
+      signatureVerified: tokenSignatureVerified,
+      responseHash: xGlToken ? `${xGlToken.slice(0, 64)}...` : null,
+      errorCode: isSuccess || isPending ? null : pgStatus || 'PAYGLOCAL_FAILED',
+      errorMessage,
+      rawGatewayLogJson: JSON.stringify({
+        rawPayload,
+        tokenClaims,
+        statusApiPayload,
+      }),
+      updatedAt: new Date(),
+    })
+    .where(eq(payments.id, payment.id))
+    .returning();
+
+  const currentTimeline = JSON.parse(order.timelineJson || '[]');
+  currentTimeline.push({
+    timestamp: new Date().toISOString(),
+    actor: 'PayGlocal Callback Verifier',
+    action: isSuccess
+      ? 'Payment Verified & Captured (PayGlocal)'
+      : isPending
+      ? 'PayGlocal Payment Pending'
+      : 'PayGlocal Payment Failed / Declined',
+    status: nextOrderStatus,
+    note: `${txnid} (GID: ${gid || 'N/A'}) — Status: ${pgStatus || 'UNKNOWN'} · Verified: ${tokenSignatureVerified}`,
+  });
+
+  const updatedOrder = await db
+    .update(orders)
+    .set({
+      orderStatus: nextOrderStatus,
+      paymentStatus: nextPaymentStatus,
+      timelineJson: JSON.stringify(currentTimeline),
+      updatedAt: new Date(),
+    })
+    .where(eq(orders.id, order.id))
+    .returning();
+
+  let updatedSession = session;
+  if (session) {
+    const sessRows = await db
+      .update(checkoutSessions)
+      .set({
+        status: nextSessionStatus,
+        completedAt: isSuccess ? new Date() : null,
+      })
+      .where(eq(checkoutSessions.id, session.id))
+      .returning();
+    updatedSession = sessRows[0];
+  }
+
+  if (isSuccess && order.paymentLinkId) {
+    const linkRows = await db
+      .select()
+      .from(paymentLinks)
+      .where(eq(paymentLinks.id, order.paymentLinkId));
+    const pLink = linkRows[0];
+    if (pLink) {
+      const newCount = pLink.purchasesCount + 1;
+      const newStatus = newCount >= pLink.maxPurchases ? 'Exhausted' : pLink.status;
+      await db
+        .update(paymentLinks)
+        .set({
+          purchasesCount: newCount,
+          status: newStatus,
+          updatedAt: new Date(),
+        })
+        .where(eq(paymentLinks.id, pLink.id));
+    }
+  }
+
+  if (isSuccess && order.customerId) {
+    const custRows = await db
+      .select()
+      .from(customers)
+      .where(eq(customers.id, order.customerId));
+    if (custRows[0]) {
+      await db
+        .update(customers)
+        .set({
+          totalSpentPaise: custRows[0].totalSpentPaise + order.totalAmountPaise,
+          updatedAt: new Date(),
+        })
+        .where(eq(customers.id, order.customerId));
+    }
+  }
+
+  const webhookEvent = isSuccess
+    ? 'payment.success'
+    : isPending
+    ? 'payment.pending'
+    : 'payment.failed';
+  await WebhookService.dispatchEvent(webhookEvent, {
+    transactionId: txnid,
+    orderNumber: order.orderNumber,
+    gateway: 'PAYGLOCAL',
+    gatewayTransactionId: gid || null,
+    amountPaise: order.totalAmountPaise,
+    currency: order.currency,
+    signatureVerified: tokenSignatureVerified,
+  });
+
+  await NotificationService.sendAndLog({
+    eventType: webhookEvent,
+    recipientEmail: order.customerEmail,
+    customerName: order.customerName,
+    orderNumber: order.orderNumber,
+    amountFormatted: `₹${(order.totalAmountPaise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`,
+    transactionId: txnid,
+    gatewayName: 'PAYGLOCAL',
+    extraNote: isSuccess
+      ? `PayGlocal GID: ${gid || txnid} · JWE/JWS Callback Verified`
+      : `PayGlocal Status: ${pgStatus || 'FAILED'}`,
+  });
+
+  return {
+    verified: tokenSignatureVerified,
+    status: isSuccess ? 'success' : isPending ? 'pending' : 'failure',
     payment: updatedPayment[0],
     order: updatedOrder[0],
     checkoutSession: updatedSession,

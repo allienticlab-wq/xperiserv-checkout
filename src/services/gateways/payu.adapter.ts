@@ -79,11 +79,11 @@ export class PayUIndiaAdapter {
         .trim()
         .slice(0, 60) || 'Customer';
     const cleanEmail =
-      String(input.email || 'customer@xperiserv.in')
+      String(input.email || '')
         .replace(/[|<>\r\n\t\s]/g, '')
-        .trim() || 'customer@xperiserv.in';
+        .trim() || 'customer@example.com';
     const digitsPhone = String(input.phone || '').replace(/\D/g, '');
-    const cleanPhone = digitsPhone.length >= 10 ? digitsPhone.slice(-10) : '9845011209';
+    const cleanPhone = digitsPhone.length >= 10 ? digitsPhone.slice(-10) : '9999999999';
 
     const udf1 = String(input.udf1 || '').replace(/[|\r\n\t]/g, '').trim();
     const udf2 = String(input.udf2 || '').replace(/[|\r\n\t]/g, '').trim();
