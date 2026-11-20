@@ -462,21 +462,25 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
     form.submit();
   };
 
-  // Detect return from PayU or PayGlocal Hosted Checkout Callback
+  // Detect return from PayU, PayGlocal, or Zoho Payments Hosted Checkout Callback
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const payuTxnid = (params.get('payu_txnid') || '').trim();
     const payuError = (params.get('payu_error') || '').trim();
     const payglocalTxnid = (params.get('payglocal_txnid') || '').trim();
     const payglocalError = (params.get('payglocal_error') || '').trim();
+    const zohoTxnid = (params.get('zoho_txnid') || '').trim();
+    const zohoError = (params.get('zoho_error') || '').trim();
 
     if (payuError) {
       setErrorMessage(payuError);
     } else if (payglocalError) {
       setErrorMessage(payglocalError);
+    } else if (zohoError) {
+      setErrorMessage(zohoError);
     }
 
-    const callbackTxnid = payuTxnid || payglocalTxnid;
+    const callbackTxnid = payuTxnid || payglocalTxnid || zohoTxnid;
     if (!callbackTxnid) return;
 
     fetch(`/api/v1/payments/by-txnid/${encodeURIComponent(callbackTxnid)}`)
@@ -1125,11 +1129,13 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                                 <button
                                   key={gw.code}
                                   type="button"
-                                  onClick={() =>
+                                  onClick={() => {
+                                    setExternalRedirectUrl(null);
+                                    setErrorMessage(null);
                                     setSelectedGatewayCode(
                                       gw.code as 'PAYU' | 'ZOHO_PAYMENTS' | 'PAYPAL' | 'PAYGLOCAL'
-                                    )
-                                  }
+                                    );
+                                  }}
                                   className={`text-left p-3.5 rounded-xl border transition-colors ${
                                     isSelected
                                       ? 'bg-emerald-950/35 border-emerald-500 text-white'
@@ -1203,11 +1209,17 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                         {externalRedirectUrl && (
                           <div className="bg-emerald-950/50 border border-emerald-500/50 rounded-xl p-4 space-y-2.5 text-xs">
                             <div className="font-semibold text-emerald-300">
-                              PayGlocal Secure Checkout Session Ready
+                              {selectedGatewayCode === 'ZOHO_PAYMENTS'
+                                ? 'Zoho Payments'
+                                : 'PayGlocal'}{' '}
+                              Secure Checkout Session Ready
                             </div>
                             <p className="text-slate-300 leading-relaxed">
-                              Click below to open PayGlocal&apos;s hosted checkout page securely in
-                              the top window:
+                              Click below to open{' '}
+                              {selectedGatewayCode === 'ZOHO_PAYMENTS'
+                                ? 'Zoho Payments'
+                                : 'PayGlocal'}
+                              &apos;s hosted checkout page securely in the top window:
                             </p>
                             <a
                               href={externalRedirectUrl}
@@ -1216,7 +1228,13 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                               className="w-full py-3 px-5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors"
                             >
                               <ExternalLink className="w-4 h-4" />
-                              <span>Proceed to PayGlocal Payment Page</span>
+                              <span>
+                                Proceed to{' '}
+                                {selectedGatewayCode === 'ZOHO_PAYMENTS'
+                                  ? 'Zoho Payments'
+                                  : 'PayGlocal'}{' '}
+                                Payment Page
+                              </span>
                             </a>
                           </div>
                         )}
@@ -1796,8 +1814,8 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                           Guest Checkout (No Account Required)
                         </h1>
                         <p className="text-xs text-slate-400">
-                          Enter contact details for Mailgun SMTP receipt &amp; choose PayU India or
-                          Zoho Payments
+                          Enter contact details for Zoho CPaaS email receipt &amp; choose your
+                          payment gateway
                         </p>
                       </div>
                       <div className="text-xs font-mono text-slate-400">
@@ -1925,11 +1943,13 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                             <button
                               key={gw.code}
                               type="button"
-                              onClick={() =>
+                              onClick={() => {
+                                setExternalRedirectUrl(null);
+                                setErrorMessage(null);
                                 setSelectedGatewayCode(
                                   gw.code as 'PAYU' | 'ZOHO_PAYMENTS' | 'PAYPAL' | 'PAYGLOCAL'
-                                )
-                              }
+                                );
+                              }}
                               className={`text-left p-4 rounded-xl border transition-colors ${
                                 isSelected
                                   ? 'bg-emerald-950/35 border-emerald-500 text-white'
@@ -2003,11 +2023,15 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                     {externalRedirectUrl && (
                       <div className="bg-emerald-950/50 border border-emerald-500/50 rounded-xl p-4 space-y-2.5 text-xs">
                         <div className="font-semibold text-emerald-300">
-                          PayGlocal Secure Checkout Session Ready
+                          {selectedGatewayCode === 'ZOHO_PAYMENTS'
+                            ? 'Zoho Payments'
+                            : 'PayGlocal'}{' '}
+                          Secure Checkout Session Ready
                         </div>
                         <p className="text-slate-300 leading-relaxed">
-                          Click below to open PayGlocal&apos;s hosted checkout page securely in the
-                          top window:
+                          Click below to open{' '}
+                          {selectedGatewayCode === 'ZOHO_PAYMENTS' ? 'Zoho Payments' : 'PayGlocal'}
+                          &apos;s hosted checkout page securely in the top window:
                         </p>
                         <a
                           href={externalRedirectUrl}
@@ -2016,7 +2040,13 @@ export const CustomerCheckoutPortal: React.FC<CustomerCheckoutPortalProps> = ({
                           className="w-full py-3 px-5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm flex items-center justify-center gap-2 transition-colors"
                         >
                           <ExternalLink className="w-4 h-4" />
-                          <span>Proceed to PayGlocal Payment Page</span>
+                          <span>
+                            Proceed to{' '}
+                            {selectedGatewayCode === 'ZOHO_PAYMENTS'
+                              ? 'Zoho Payments'
+                              : 'PayGlocal'}{' '}
+                            Payment Page
+                          </span>
                         </a>
                       </div>
                     )}

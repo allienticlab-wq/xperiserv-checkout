@@ -21,14 +21,22 @@ import {
   webhookEndpoints,
 } from './schema.ts';
 import { PayUIndiaAdapter } from '../services/gateways/payu.adapter.ts';
-import { ZohoPaymentsAdapter } from '../services/gateways/zoho.adapter.ts';
+import {
+  ZohoPaymentsAdapter,
+  ZohoPaymentsConfig,
+  normalizeZohoRegion,
+} from '../services/gateways/zoho.adapter.ts';
 import {
   PayGlocalAdapter,
   PayGlocalConfig,
   normalizePemString,
 } from '../services/gateways/payglocal.adapter.ts';
 import { WebhookService } from '../services/webhook.service.ts';
-import { NotificationService } from '../services/notification.service.ts';
+import {
+  NotificationService,
+  getZohoCpaasEndpoints,
+  normalizeZohoCpaasRegion,
+} from '../services/notification.service.ts';
 import { XPERISERV_POLICY_VERSION } from '../data/xperiservPolicies.ts';
 
 let isSchemaBootstrapped = false;
@@ -94,6 +102,52 @@ export function resolvePayGlocalCredentials(gateway: any): PayGlocalConfig {
     merchantPrivateKeyPem: normalizePemString(rawPrivatePem, 'PRIVATE'),
     payglocalPublicKeyPem: normalizePemString(rawPublicPem, 'PUBLIC'),
     webhookSecret: String(gateway?.webhookSecret || process.env.PAYGLOCAL_WEBHOOK_SECRET || '').trim(),
+  };
+}
+
+export function resolveZohoCredentials(gateway: any): ZohoPaymentsConfig {
+  let ruleObj: Record<string, any> = {};
+  try {
+    ruleObj = JSON.parse(gateway?.routingRuleJson || '{}') || {};
+  } catch {
+    ruleObj = {};
+  }
+  const rawSecret = String(
+    gateway?.encryptedSecretOrSalt ||
+      process.env.ZOHO_OAUTH_CLIENT_SECRET ||
+      process.env.ZOHO_PAYMENTS_CLIENT_SECRET ||
+      ''
+  )
+    .replace(/^enc_aes256_/, '')
+    .trim();
+
+  return {
+    environment: ((gateway?.environment as 'SANDBOX' | 'PRODUCTION') || 'PRODUCTION'),
+    region: normalizeZohoRegion(
+      ruleObj.zohoRegion || process.env.ZOHO_PAYMENTS_REGION || 'IN'
+    ),
+    accountId: String(
+      gateway?.merchantId ||
+        process.env.ZOHO_ACCOUNT_ID ||
+        process.env.ZOHO_PAYMENTS_ACCOUNT_ID ||
+        ''
+    ).trim(),
+    clientId: String(
+      gateway?.publicKeyOrClientId ||
+        process.env.ZOHO_OAUTH_CLIENT_ID ||
+        process.env.ZOHO_PAYMENTS_CLIENT_ID ||
+        ''
+    ).trim(),
+    clientSecret: rawSecret,
+    refreshToken: String(
+      ruleObj.refreshToken || process.env.ZOHO_OAUTH_REFRESH_TOKEN || ''
+    ).trim(),
+    webhookSecret: String(
+      gateway?.webhookSecret ||
+        process.env.ZOHO_WEBHOOK_SECRET ||
+        process.env.ZOHO_PAYMENTS_WEBHOOK_SECRET ||
+        ''
+    ).trim(),
   };
 }
 
@@ -269,7 +323,7 @@ export async function ensureSeeded() {
         },
         {
           code: 'ZOHO_PAYMENTS',
-          displayName: 'Zoho Payments (India Merchant)',
+          displayName: 'Zoho Payments (OAuth 2.0 + Payment Links)',
           enabled: true,
           isDefault: false,
           environment: process.env.ZOHO_PAYMENTS_ENVIRONMENT || 'PRODUCTION',
@@ -277,7 +331,7 @@ export async function ensureSeeded() {
           publicKeyOrClientId: process.env.ZOHO_OAUTH_CLIENT_ID || '',
           encryptedSecretOrSalt: process.env.ZOHO_OAUTH_CLIENT_SECRET || '',
           webhookSecret: process.env.ZOHO_WEBHOOK_SECRET || '',
-          supportedCurrencies: 'INR',
+          supportedCurrencies: 'INR,USD,EUR,GBP,AED,SGD,AUD,CAD',
           supportedMethods: 'UPI,CARD,NETBANKING',
           minTransactionPaise: 100,
           maxTransactionPaise: 25000000,
@@ -286,7 +340,9 @@ export async function ensureSeeded() {
             manualSelectionAllowed: true,
             b2bInvoicePreferred: true,
             walletsSupported: false,
-            notes: 'Official Zoho Payments Production Gateway',
+            zohoRegion: process.env.ZOHO_PAYMENTS_REGION || 'IN',
+            refreshToken: process.env.ZOHO_OAUTH_REFRESH_TOKEN || '',
+            notes: 'Official Zoho Payments OAuth 2.0 & Payment Links Gateway',
           }),
           healthStatus: 'Operational',
           successRatePercent: 100,
@@ -416,6 +472,38 @@ export async function ensureSeeded() {
       .update(`allientic_admin_salt_v1:${defaultAdminPassword}`)
       .digest('hex');
 
+    // Remove any legacy Mailgun settings row from PostgreSQL
+    try {
+      await db
+        .delete(systemSettings)
+        .where(eq(systemSettings.settingKey, 'mailgun_smtp_config'));
+      const platRows = await db
+        .select()
+        .from(systemSettings)
+        .where(eq(systemSettings.settingKey, 'platform_config'));
+      if (platRows[0]) {
+        const parsedPlat = JSON.parse(platRows[0].settingValueJson || '{}');
+        if (
+          parsedPlat.smtpProvider === 'Mailgun SMTP' ||
+          parsedPlat.mailgunDomain ||
+          String(parsedPlat.smtpHost || '').includes('mailgun')
+        ) {
+          delete parsedPlat.mailgunDomain;
+          parsedPlat.smtpProvider = 'Zoho CPaaS Transactional Email';
+          parsedPlat.smtpHost = 'cpaas.zoho.in';
+          parsedPlat.smtpPort = 443;
+          parsedPlat.smtpUser = 'Zoho-enczapikey';
+          parsedPlat.smtpFrom = 'Allientic Checkout <checkout@xperiserv.in>';
+          await db
+            .update(systemSettings)
+            .set({ settingValueJson: JSON.stringify(parsedPlat), updatedAt: new Date() })
+            .where(eq(systemSettings.id, platRows[0].id));
+        }
+      }
+    } catch {
+      // ignore optional cleanup
+    }
+
     await db
       .insert(systemSettings)
       .values([
@@ -435,13 +523,12 @@ export async function ensureSeeded() {
             enforceHmacSignatures: true,
             enforceAdminMfa: true,
             passwordHashAlgorithm: 'Argon2id / SHA-256 Salted',
-            smtpProvider: 'Mailgun SMTP',
-            mailgunDomain: process.env.MAILGUN_DOMAIN || 'mg.xperiserv.in',
-            smtpHost: process.env.MAILGUN_SMTP_HOST || 'smtp.mailgun.org',
-            smtpPort: Number(process.env.MAILGUN_SMTP_PORT || 587),
-            smtpUser: process.env.MAILGUN_SMTP_USER || 'postmaster@mg.xperiserv.in',
+            smtpProvider: 'Zoho CPaaS Transactional Email',
+            smtpHost: process.env.ZOHO_CPAAS_SMTP_HOST || 'smtp.zeptomail.in',
+            smtpPort: Number(process.env.ZOHO_CPAAS_SMTP_PORT || 587),
+            smtpUser: process.env.ZOHO_CPAAS_SMTP_USER || 'emailapikey',
             smtpFrom:
-              process.env.MAILGUN_FROM_EMAIL || 'Allientic Checkout <checkout@mg.xperiserv.in>',
+              process.env.ZOHO_CPAAS_FROM_EMAIL || 'Allientic Checkout <checkout@xperiserv.in>',
             automatedDailyBackups: true,
           }),
           updatedBy: adminEmail,
@@ -519,6 +606,8 @@ export async function getPlatformSnapshot() {
       const payglocalPublicKeyPem = String(ruleObj.payglocalPublicKeyPem || '').trim();
       const privateKeyId = String(ruleObj.privateKeyId || gw.publicKeyOrClientId || '').trim();
       const publicKeyId = String(ruleObj.publicKeyId || gw.publicKeyOrClientId || '').trim();
+      const refreshToken = String(ruleObj.refreshToken || '').trim();
+      const zohoRegion = normalizeZohoRegion(ruleObj.zohoRegion || 'IN');
       return {
         ...gw,
         secretOrSalt: rawSecret,
@@ -526,6 +615,9 @@ export async function getPlatformSnapshot() {
         privateKeyId,
         publicKeyId,
         payglocalPublicKeyPem,
+        refreshToken,
+        zohoRegion,
+        hasRefreshTokenConfigured: Boolean(refreshToken.length > 0),
         hasPayGlocalPublicKeyPem: Boolean(payglocalPublicKeyPem.length > 0),
         hasSecretConfigured: Boolean(rawSecret.length > 0),
         hasWebhookSecretConfigured: Boolean(rawWebhook.length > 0),
@@ -579,33 +671,35 @@ export async function getPlatformSnapshot() {
       ...(savedMerchantTaxConfig || {}),
     };
 
-    const mailgunSettingRow = allSettings.find((s) => s.settingKey === 'mailgun_smtp_config');
-    let savedMailgunConfig: any = null;
-    if (mailgunSettingRow) {
+    const zohoCpaasRow = allSettings.find((s) => s.settingKey === 'zoho_cpaas_mail_config');
+    const defaultRegion = normalizeZohoCpaasRegion(process.env.ZOHO_CPAAS_REGION || 'IN');
+    const defaultEndpoints = getZohoCpaasEndpoints(defaultRegion);
+    let savedZohoCpaasConfig: any = null;
+    if (zohoCpaasRow) {
       try {
-        const parsed = JSON.parse(mailgunSettingRow.settingValueJson);
-        savedMailgunConfig = {
-          smtpHost: parsed.smtpHost || process.env.SMTP_HOST || 'smtp.mailgun.org',
-          smtpPort: parsed.smtpPort || process.env.SMTP_PORT || '587',
-          mailgunDomain: parsed.mailgunDomain || process.env.MAILGUN_DOMAIN || 'mg.xperiserv.in',
-          smtpUser: parsed.smtpUser || process.env.SMTP_USER || 'postmaster@mg.xperiserv.in',
-          smtpPassword: parsed.smtpPassword || process.env.SMTP_PASSWORD || '',
-          mailgunApiKey: parsed.mailgunApiKey || process.env.MAILGUN_API_KEY || '',
-          mailgunRegion: parsed.mailgunRegion === 'EU' ? 'EU' : 'US',
-          hasPasswordConfigured: Boolean(
-            parsed.smtpPassword ||
-              process.env.SMTP_PASSWORD ||
-              parsed.mailgunApiKey ||
-              process.env.MAILGUN_API_KEY
-          ),
-          smtpFrom:
-            parsed.smtpFrom ||
-            process.env.SMTP_FROM ||
-            'Allientic Checkout <checkout@mg.xperiserv.in>',
+        const parsed = JSON.parse(zohoCpaasRow.settingValueJson);
+        const reg = normalizeZohoCpaasRegion(parsed.zohoRegion || defaultRegion);
+        const ep = getZohoCpaasEndpoints(reg);
+        savedZohoCpaasConfig = {
+          zohoRegion: reg,
+          sendMailToken: parsed.sendMailToken ?? process.env.ZOHO_CPAAS_SEND_MAIL_TOKEN ?? '',
+          fromEmail: parsed.fromEmail || process.env.ZOHO_CPAAS_FROM_EMAIL || 'checkout@xperiserv.in',
+          fromName: parsed.fromName || process.env.ZOHO_CPAAS_FROM_NAME || 'Allientic Checkout',
+          replyToEmail: parsed.replyToEmail || process.env.ZOHO_CPAAS_REPLY_TO || '',
+          smtpHost: parsed.smtpHost || process.env.ZOHO_CPAAS_SMTP_HOST || ep.smtpHost,
+          smtpPort: String(parsed.smtpPort || process.env.ZOHO_CPAAS_SMTP_PORT || '587'),
+          smtpUser: parsed.smtpUser || process.env.ZOHO_CPAAS_SMTP_USER || 'emailapikey',
+          smtpPassword: parsed.smtpPassword || process.env.ZOHO_CPAAS_SMTP_PASSWORD || '',
           testRecipient: parsed.testRecipient || 'admin@xperiserv.in',
+          hasTokenConfigured: Boolean(
+            parsed.sendMailToken ||
+              process.env.ZOHO_CPAAS_SEND_MAIL_TOKEN ||
+              parsed.smtpPassword ||
+              process.env.ZOHO_CPAAS_SMTP_PASSWORD
+          ),
         };
       } catch {
-        savedMailgunConfig = null;
+        savedZohoCpaasConfig = null;
       }
     }
 
@@ -630,17 +724,20 @@ export async function getPlatformSnapshot() {
       auditLogs: allAuditLogs,
       settings: platformSettingRow ? JSON.parse(platformSettingRow.settingValueJson) : {},
       merchantTaxConfig: mergedMerchantTaxConfig,
-      mailgunConfig: savedMailgunConfig || {
-        smtpHost: process.env.SMTP_HOST || 'smtp.mailgun.org',
-        smtpPort: process.env.SMTP_PORT || '587',
-        mailgunDomain: process.env.MAILGUN_DOMAIN || 'mg.xperiserv.in',
-        smtpUser: process.env.SMTP_USER || 'postmaster@mg.xperiserv.in',
-        smtpPassword: process.env.SMTP_PASSWORD || '',
-        mailgunApiKey: process.env.MAILGUN_API_KEY || '',
-        mailgunRegion: 'US',
-        hasPasswordConfigured: Boolean(process.env.SMTP_PASSWORD || process.env.MAILGUN_API_KEY),
-        smtpFrom: process.env.SMTP_FROM || 'Allientic Checkout <checkout@mg.xperiserv.in>',
+      zohoCpaasConfig: savedZohoCpaasConfig || {
+        zohoRegion: defaultRegion,
+        sendMailToken: process.env.ZOHO_CPAAS_SEND_MAIL_TOKEN || '',
+        fromEmail: process.env.ZOHO_CPAAS_FROM_EMAIL || 'checkout@xperiserv.in',
+        fromName: process.env.ZOHO_CPAAS_FROM_NAME || 'Allientic Checkout',
+        replyToEmail: process.env.ZOHO_CPAAS_REPLY_TO || '',
+        smtpHost: process.env.ZOHO_CPAAS_SMTP_HOST || defaultEndpoints.smtpHost,
+        smtpPort: process.env.ZOHO_CPAAS_SMTP_PORT || '587',
+        smtpUser: process.env.ZOHO_CPAAS_SMTP_USER || 'emailapikey',
+        smtpPassword: process.env.ZOHO_CPAAS_SMTP_PASSWORD || '',
         testRecipient: 'admin@xperiserv.in',
+        hasTokenConfigured: Boolean(
+          process.env.ZOHO_CPAAS_SEND_MAIL_TOKEN || process.env.ZOHO_CPAAS_SMTP_PASSWORD
+        ),
       },
     };
   } catch (error) {
@@ -1306,12 +1403,7 @@ export async function processCheckoutPayment(input: {
       if (!input.forceSimulate) {
         if (!pgConfig.merchantId || !pgConfig.merchantPrivateKeyPem || (!pgConfig.privateKeyId && !pgConfig.publicKeyId)) {
           throw new Error(
-            'PayGlocal Merchant ID, Private Key ID (x-gl-kid), and Merchant Private Key (.pem) are required. Upload your .pem key files in Admin Portal → 8. Payment Gateways.'
-          );
-        }
-        if (!pgConfig.payglocalPublicKeyPem) {
-          throw new Error(
-            'PayGlocal Public Key (.pem) is required for JWE encryption. Upload PayGlocal Public Key .pem and Public Key ID (kid) in Admin Portal → 8. Payment Gateways.'
+            'PayGlocal Merchant ID, Private Key ID (x-gl-kid), and Merchant Private Key (.pem) are required. Upload your .pem key file in Admin Portal → 8. Payment Gateways.'
           );
         }
 
@@ -1464,13 +1556,143 @@ export async function processCheckoutPayment(input: {
         signatureVerified,
       };
     } else {
-      const zohoConfig = {
-        environment: (gateway.environment as 'SANDBOX' | 'PRODUCTION') || 'PRODUCTION',
-        accountId: gateway.merchantId || process.env.ZOHO_ACCOUNT_ID || 'ZOHO-ACCT-LIVE',
-        clientId: gateway.publicKeyOrClientId || process.env.ZOHO_OAUTH_CLIENT_ID || 'ZOHO_CLIENT_ID',
-        clientSecret: rawSavedSecret || process.env.ZOHO_OAUTH_CLIENT_SECRET || 'zoho_secret_key',
-        webhookSecret: gateway.webhookSecret || process.env.ZOHO_WEBHOOK_SECRET || 'whsec_zoho_live',
-      };
+      const zohoConfig = resolveZohoCredentials(gateway);
+      const baseUrl = (
+        input.callbackBaseUrl ||
+        process.env.PUBLIC_APP_URL ||
+        'https://checkout.xperiserv.in'
+      ).replace(/\/+$/, '');
+      const callbackUrl = `${baseUrl}/api/v1/callbacks/zoho?txnid=${encodeURIComponent(txnid)}`;
+
+      if (!input.forceSimulate) {
+        if (!zohoConfig.accountId || !zohoConfig.clientId || !zohoConfig.clientSecret) {
+          throw new Error(
+            'Zoho Payments Account ID, OAuth Client ID, and Client Secret are required. Configure them in Admin Portal → 8. Payment Gateways.'
+          );
+        }
+        if (!zohoConfig.refreshToken) {
+          throw new Error(
+            'Zoho OAuth Refresh Token is required for live Zoho Payments checkout. Paste your Zoho Refresh Token (scope: ZohoPay.payments.CREATE,READ) in Admin Portal → 8. Payment Gateways.'
+          );
+        }
+
+        let billingParsed: Record<string, any> = {};
+        try {
+          billingParsed = JSON.parse(input.billingAddress || order.billingAddress || '{}') || {};
+        } catch {
+          billingParsed = {};
+        }
+
+        const orderBaseCurr = String(order.currency || 'INR').toUpperCase();
+        const displayCurr = String(billingParsed.displayCurrency || orderBaseCurr).toUpperCase();
+        const fxRate = Number(billingParsed.exchangeRate || 1);
+        const effectiveAmountMajor =
+          displayCurr !== orderBaseCurr && Number.isFinite(fxRate) && fxRate > 0 && fxRate !== 1
+            ? Number(((order.totalAmountPaise / 100) * fxRate).toFixed(2))
+            : Number((order.totalAmountPaise / 100).toFixed(2));
+
+        const zohoLink = await ZohoPaymentsAdapter.createPaymentLink(
+          {
+            referenceNumber: txnid,
+            amountMajor: effectiveAmountMajor,
+            currency: displayCurr,
+            description: `Allientic Order ${order.orderNumber}`,
+            customerName: finalCustomerName,
+            customerEmail: finalCustomerEmail,
+            customerPhone: finalCustomerMobile,
+            returnUrl: callbackUrl,
+          },
+          zohoConfig
+        );
+
+        const insertedPendingPayment = await db
+          .insert(payments)
+          .values({
+            transactionId: txnid,
+            orderId: order.id,
+            checkoutSessionId: session.id,
+            customerId: order.customerId,
+            gatewayCode: 'ZOHO_PAYMENTS',
+            gatewayTransactionId: zohoLink.paymentLinkId || null,
+            gatewayReferenceId: zohoLink.referenceId || txnid,
+            paymentMethod: resolvedMethod,
+            paymentInstrumentDetail: resolvedInstrument,
+            amountPaise: order.totalAmountPaise,
+            refundedAmountPaise: 0,
+            currency: order.currency,
+            status: 'Pending',
+            signatureVerified: false,
+            requestHash: crypto
+              .createHash('sha256')
+              .update(`${zohoConfig.accountId}|${txnid}|${effectiveAmountMajor}|${displayCurr}`)
+              .digest('hex'),
+            responseHash: null,
+            errorCode: null,
+            errorMessage: null,
+            idempotencyKey: `idem_${txnid}`,
+            settlementStatus: 'Unsettled',
+            rawGatewayLogJson: JSON.stringify({
+              gateway: 'ZOHO_PAYMENTS',
+              environment: zohoConfig.environment,
+              region: zohoConfig.region || 'IN',
+              endpoint: zohoLink.endpoint,
+              paymentLinkId: zohoLink.paymentLinkId,
+              redirectUrl: zohoLink.redirectUrl,
+              status: zohoLink.status,
+              txnid,
+            }),
+          })
+          .returning();
+
+        const currentTimeline = JSON.parse(order.timelineJson || '[]');
+        currentTimeline.push({
+          timestamp: new Date().toISOString(),
+          actor: 'Zoho Payments Initiator',
+          action: 'Redirected to Zoho Payments Hosted Checkout',
+          status: 'Payment Initiated',
+          note: `${txnid} (Payment Link ID: ${zohoLink.paymentLinkId || 'Pending'}) created via ${zohoLink.endpoint} (${zohoConfig.region || 'IN'} · ${zohoConfig.environment})`,
+        });
+
+        const updatedPendingOrder = await db
+          .update(orders)
+          .set({
+            customerName: finalCustomerName,
+            customerEmail: finalCustomerEmail,
+            customerMobile: finalCustomerMobile,
+            billingAddress: input.billingAddress || order.billingAddress,
+            shippingAddress: input.shippingAddress || order.shippingAddress,
+            orderStatus: 'Payment Initiated',
+            paymentStatus: 'Pending',
+            acceptedPolicyVersion: finalPolicyVersion,
+            acceptedPolicyTimestamp: new Date(),
+            timelineJson: JSON.stringify(currentTimeline),
+            updatedAt: new Date(),
+          })
+          .where(eq(orders.id, order.id))
+          .returning();
+
+        const updatedPendingSession = await db
+          .update(checkoutSessions)
+          .set({
+            status: 'Processing',
+            selectedGateway: 'ZOHO_PAYMENTS',
+          })
+          .where(eq(checkoutSessions.id, session.id))
+          .returning();
+
+        return {
+          redirectRequired: true,
+          gateway: 'ZOHO_PAYMENTS',
+          environment: zohoConfig.environment,
+          redirectUrl: zohoLink.redirectUrl,
+          paymentLinkId: zohoLink.paymentLinkId,
+          payment: insertedPendingPayment[0],
+          order: updatedPendingOrder[0],
+          checkoutSession: updatedPendingSession[0],
+        };
+      }
+
+      // Admin diagnostic mode only (forceSimulate: true)
       const sessionPayload = ZohoPaymentsAdapter.createPaymentSessionPayload(
         {
           referenceNumber: txnid,
@@ -1480,7 +1702,7 @@ export async function processCheckoutPayment(input: {
           customerName: finalCustomerName,
           customerEmail: finalCustomerEmail,
           customerPhone: finalCustomerMobile,
-          returnUrl: `https://checkout.xperiserv.in/checkout/${session.sessionToken}`,
+          returnUrl: callbackUrl,
         },
         zohoConfig
       );
@@ -1497,28 +1719,32 @@ export async function processCheckoutPayment(input: {
               : 'payment.failed',
         payment: {
           payment_id: gatewayTransactionId,
-          reference_number: txnid,
+          reference_id: txnid,
           amount: Number(amountRupeesStr),
           currency: order.currency,
         },
       });
-      responseHash = crypto
-        .createHmac('sha256', zohoConfig.webhookSecret)
-        .update(webhookBody)
+      const simTimestamp = Math.floor(Date.now() / 1000).toString();
+      const simSecret = zohoConfig.webhookSecret || 'whsec_zoho_diag';
+      const simHmac = crypto
+        .createHmac('sha256', simSecret)
+        .update(`${simTimestamp}.${webhookBody}`)
         .digest('hex');
+      responseHash = `t=${simTimestamp},v=${simHmac}`;
 
       signatureVerified = ZohoPaymentsAdapter.verifyWebhookSignature(
         webhookBody,
         responseHash,
-        zohoConfig.webhookSecret
+        simSecret
       );
 
       rawGatewayLog = {
         gateway: 'ZOHO_PAYMENTS',
         environment: zohoConfig.environment,
+        region: zohoConfig.region || 'IN',
         zohoSessionId: sessionPayload.zohoSessionId,
         payment_id: gatewayTransactionId,
-        reference_number: txnid,
+        reference_id: txnid,
         payment_method: resolvedMethod,
         signatureVerified,
       };
@@ -1772,20 +1998,32 @@ export async function initiateRefund(input: {
     } else if (payment.gatewayCode === 'PAYGLOCAL') {
       gatewayRefundId = `PGL-RFD-${Date.now().toString(36).toUpperCase()}`;
     } else {
-      const zohoCmd = ZohoPaymentsAdapter.buildRefundPayload(
-        payment.gatewayTransactionId || payment.transactionId,
-        input.amountPaise / 100,
-        input.reason,
-        refundReferenceId,
-        {
-          environment: (gw?.environment as 'SANDBOX' | 'PRODUCTION') || 'PRODUCTION',
-          accountId: gw?.merchantId || process.env.ZOHO_ACCOUNT_ID || '',
-          clientId: gw?.publicKeyOrClientId || process.env.ZOHO_OAUTH_CLIENT_ID || '',
-          clientSecret: savedGwSecret || process.env.ZOHO_OAUTH_CLIENT_SECRET || '',
-          webhookSecret: gw?.webhookSecret || process.env.ZOHO_WEBHOOK_SECRET || '',
-        }
-      );
-      gatewayRefundId = zohoCmd.gatewayRefundId;
+      const zohoConfig = resolveZohoCredentials(gw);
+      const targetGatewayId = payment.gatewayTransactionId || payment.transactionId;
+      if (
+        zohoConfig.refreshToken &&
+        zohoConfig.accountId &&
+        targetGatewayId &&
+        !targetGatewayId.startsWith('zpay_')
+      ) {
+        const liveRfd = await ZohoPaymentsAdapter.initiateLiveRefund(
+          targetGatewayId,
+          input.amountPaise / 100,
+          input.reason,
+          refundType === 'FULL',
+          zohoConfig
+        );
+        gatewayRefundId = liveRfd.refundId;
+      } else {
+        const zohoCmd = ZohoPaymentsAdapter.buildRefundPayload(
+          targetGatewayId,
+          input.amountPaise / 100,
+          input.reason,
+          refundReferenceId,
+          zohoConfig
+        );
+        gatewayRefundId = zohoCmd.gatewayRefundId;
+      }
     }
 
     const newRefundedTotal = payment.refundedAmountPaise + input.amountPaise;
@@ -2414,6 +2652,315 @@ export async function handlePayGlocalCallback(
 
   return {
     verified: tokenSignatureVerified,
+    status: isSuccess ? 'success' : isPending ? 'pending' : 'failure',
+    payment: updatedPayment[0],
+    order: updatedOrder[0],
+    checkoutSession: updatedSession,
+    redirectPath,
+  };
+}
+
+export async function handleZohoCallback(
+  rawPayload: Record<string, any>,
+  rawBody?: string,
+  headers: Record<string, any> = {}
+) {
+  await ensureSeeded();
+  const gateways = await db
+    .select()
+    .from(paymentGateways)
+    .where(eq(paymentGateways.code, 'ZOHO_PAYMENTS'));
+  const gateway = gateways[0];
+  const zohoConfig = resolveZohoCredentials(gateway);
+
+  // Extract webhook vs return URL fields
+  const eventType = String(rawPayload.event_type || '').toLowerCase();
+  const eventObj =
+    rawPayload.event_object?.payment ||
+    rawPayload.event_object?.payment_link ||
+    rawPayload.payment ||
+    rawPayload.payment_link ||
+    rawPayload;
+
+  let txnid = String(
+    rawPayload.txnid ||
+      eventObj?.reference_id ||
+      eventObj?.reference_number ||
+      rawPayload.reference_id ||
+      ''
+  ).trim();
+  let paymentLinkId = String(
+    rawPayload.payment_link_id || eventObj?.payment_link_id || ''
+  ).trim();
+  let zohoPaymentId = String(
+    rawPayload.payment_id || eventObj?.payment_id || ''
+  ).trim();
+  let zohoStatus = String(
+    rawPayload.status || eventObj?.status || (eventType.includes('succeed') || eventType.includes('paid') ? 'paid' : '')
+  )
+    .trim()
+    .toLowerCase();
+
+  // Verify X-Zoho-Webhook-Signature header if webhook body arrived
+  let signatureVerified = false;
+  const sigHeader = String(
+    headers['x-zoho-webhook-signature'] || headers['X-Zoho-Webhook-Signature'] || ''
+  ).trim();
+  if (sigHeader && rawBody && zohoConfig.webhookSecret) {
+    signatureVerified = ZohoPaymentsAdapter.verifyWebhookSignature(
+      rawBody,
+      sigHeader,
+      zohoConfig.webhookSecret
+    );
+    if (!signatureVerified) {
+      throw new Error('Zoho Webhook X-Zoho-Webhook-Signature verification failed.');
+    }
+  } else if (rawPayload.signature && zohoPaymentId && zohoConfig.webhookSecret) {
+    signatureVerified = ZohoPaymentsAdapter.verifyReturnSignature(
+      zohoPaymentId,
+      paymentLinkId || String(rawPayload.payments_session_id || ''),
+      String(rawPayload.signature),
+      zohoConfig.webhookSecret
+    );
+  }
+
+  // Find internal payment record
+  const allPayRows = await db.select().from(payments);
+  const payment =
+    (txnid ? allPayRows.find((p) => p.transactionId === txnid) : undefined) ||
+    (paymentLinkId
+      ? allPayRows.find((p) => p.gatewayTransactionId === paymentLinkId)
+      : undefined) ||
+    (zohoPaymentId
+      ? allPayRows.find((p) => p.gatewayTransactionId === zohoPaymentId)
+      : undefined);
+
+  if (!payment) {
+    throw new Error(
+      `Zoho payment transaction (${txnid || paymentLinkId || zohoPaymentId || 'unknown'}) not found.`
+    );
+  }
+  txnid = payment.transactionId;
+  paymentLinkId = paymentLinkId || (payment.gatewayTransactionId || '');
+
+  // Live verify with Zoho Payments API whenever OAuth refresh token is configured
+  let apiStatusPayload: Record<string, any> | null = null;
+  if (zohoConfig.refreshToken && zohoConfig.accountId) {
+    try {
+      if (zohoPaymentId) {
+        apiStatusPayload = await ZohoPaymentsAdapter.fetchPaymentStatus(zohoPaymentId, zohoConfig);
+        const fetchedPayment = apiStatusPayload?.payment || apiStatusPayload?.data;
+        if (fetchedPayment?.status) {
+          zohoStatus = String(fetchedPayment.status).toLowerCase();
+          signatureVerified = true;
+        }
+      } else if (paymentLinkId) {
+        apiStatusPayload = await ZohoPaymentsAdapter.fetchPaymentLinkStatus(
+          paymentLinkId,
+          zohoConfig
+        );
+        const fetchedLink = apiStatusPayload?.payment_link || apiStatusPayload?.data;
+        if (fetchedLink?.status) {
+          zohoStatus = String(fetchedLink.status).toLowerCase();
+          if (fetchedLink.payments?.[0]?.payment_id) {
+            zohoPaymentId = String(fetchedLink.payments[0].payment_id);
+          }
+          signatureVerified = true;
+        }
+      }
+    } catch {
+      // Retain webhook/callback status if live poll encounters transient error
+    }
+  }
+
+  const foundOrders = await db.select().from(orders).where(eq(orders.id, payment.orderId));
+  const order = foundOrders[0];
+  if (!order) {
+    throw new Error(`Order for Zoho payment ${txnid} not found.`);
+  }
+
+  const foundSessions = payment.checkoutSessionId
+    ? await db
+        .select()
+        .from(checkoutSessions)
+        .where(eq(checkoutSessions.id, payment.checkoutSessionId))
+    : [];
+  const session = foundSessions[0] || null;
+
+  const successStates = new Set([
+    'succeeded',
+    'paid',
+    'captured',
+    'success',
+    'completed',
+    'authorized',
+    'payment.succeeded',
+    'payment_link.paid',
+  ]);
+  const pendingStates = new Set(['pending', 'active', 'created', 'initiated', 'processing']);
+
+  const isSuccess =
+    successStates.has(zohoStatus) ||
+    eventType === 'payment.succeeded' ||
+    eventType === 'payment_link.paid';
+  const isPending = !isSuccess && pendingStates.has(zohoStatus);
+
+  const linkToken = order.paymentLinkToken || '';
+  const sessionToken = session?.sessionToken || 'public_storefront';
+  const redirectPath = linkToken
+    ? `/pay/${encodeURIComponent(linkToken)}?zoho_txnid=${encodeURIComponent(txnid)}&zoho_status=${isSuccess ? 'success' : isPending ? 'pending' : 'failure'}`
+    : `/checkout/${encodeURIComponent(sessionToken)}?zoho_txnid=${encodeURIComponent(txnid)}&zoho_status=${isSuccess ? 'success' : isPending ? 'pending' : 'failure'}`;
+
+  if (payment.status === 'Captured') {
+    return {
+      verified: true,
+      status: 'success',
+      payment,
+      order,
+      checkoutSession: session,
+      redirectPath,
+    };
+  }
+
+  const nextPaymentStatus = isSuccess ? 'Captured' : isPending ? 'Pending' : 'Failed';
+  const nextOrderStatus = isSuccess
+    ? 'Paid'
+    : isPending
+    ? 'Payment Initiated'
+    : 'Payment Failed';
+  const nextSessionStatus = isSuccess
+    ? 'Completed'
+    : isPending
+    ? 'Processing'
+    : 'Open';
+
+  const errorMessage =
+    isSuccess || isPending
+      ? null
+      : `Zoho Payments returned status "${zohoStatus || 'failed'}"`;
+
+  const updatedPayment = await db
+    .update(payments)
+    .set({
+      gatewayTransactionId: zohoPaymentId || paymentLinkId || payment.gatewayTransactionId,
+      gatewayReferenceId: paymentLinkId || payment.gatewayReferenceId,
+      status: nextPaymentStatus,
+      signatureVerified,
+      responseHash: sigHeader || (rawPayload.signature ? String(rawPayload.signature) : null),
+      errorCode: isSuccess || isPending ? null : zohoStatus.toUpperCase() || 'ZOHO_FAILED',
+      errorMessage,
+      rawGatewayLogJson: JSON.stringify({
+        rawPayload,
+        apiStatusPayload,
+      }),
+      updatedAt: new Date(),
+    })
+    .where(eq(payments.id, payment.id))
+    .returning();
+
+  const currentTimeline = JSON.parse(order.timelineJson || '[]');
+  currentTimeline.push({
+    timestamp: new Date().toISOString(),
+    actor: 'Zoho Payments Callback Verifier',
+    action: isSuccess
+      ? 'Payment Verified & Captured (Zoho Payments)'
+      : isPending
+      ? 'Zoho Payment Pending'
+      : 'Zoho Payment Failed / Cancelled',
+    status: nextOrderStatus,
+    note: `${txnid} (Zoho ID: ${zohoPaymentId || paymentLinkId || 'N/A'}) — Status: ${zohoStatus || 'unknown'} · Verified: ${signatureVerified}`,
+  });
+
+  const updatedOrder = await db
+    .update(orders)
+    .set({
+      orderStatus: nextOrderStatus,
+      paymentStatus: nextPaymentStatus,
+      timelineJson: JSON.stringify(currentTimeline),
+      updatedAt: new Date(),
+    })
+    .where(eq(orders.id, order.id))
+    .returning();
+
+  let updatedSession = session;
+  if (session) {
+    const sessRows = await db
+      .update(checkoutSessions)
+      .set({
+        status: nextSessionStatus,
+        completedAt: isSuccess ? new Date() : null,
+      })
+      .where(eq(checkoutSessions.id, session.id))
+      .returning();
+    updatedSession = sessRows[0];
+  }
+
+  if (isSuccess && order.paymentLinkId) {
+    const linkRows = await db
+      .select()
+      .from(paymentLinks)
+      .where(eq(paymentLinks.id, order.paymentLinkId));
+    const pLink = linkRows[0];
+    if (pLink) {
+      const newCount = pLink.purchasesCount + 1;
+      const newStatus = newCount >= pLink.maxPurchases ? 'Exhausted' : pLink.status;
+      await db
+        .update(paymentLinks)
+        .set({
+          purchasesCount: newCount,
+          status: newStatus,
+          updatedAt: new Date(),
+        })
+        .where(eq(paymentLinks.id, pLink.id));
+    }
+  }
+
+  if (isSuccess && order.customerId) {
+    const custRows = await db
+      .select()
+      .from(customers)
+      .where(eq(customers.id, order.customerId));
+    if (custRows[0]) {
+      await db
+        .update(customers)
+        .set({
+          totalSpentPaise: custRows[0].totalSpentPaise + order.totalAmountPaise,
+          updatedAt: new Date(),
+        })
+        .where(eq(customers.id, order.customerId));
+    }
+  }
+
+  const webhookEvent = isSuccess
+    ? 'payment.success'
+    : isPending
+    ? 'payment.pending'
+    : 'payment.failed';
+  await WebhookService.dispatchEvent(webhookEvent, {
+    transactionId: txnid,
+    orderNumber: order.orderNumber,
+    gateway: 'ZOHO_PAYMENTS',
+    gatewayTransactionId: zohoPaymentId || paymentLinkId || null,
+    amountPaise: order.totalAmountPaise,
+    currency: order.currency,
+    signatureVerified,
+  });
+
+  await NotificationService.sendAndLog({
+    eventType: webhookEvent,
+    recipientEmail: order.customerEmail,
+    customerName: order.customerName,
+    orderNumber: order.orderNumber,
+    amountFormatted: `₹${(order.totalAmountPaise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`,
+    transactionId: txnid,
+    gatewayName: 'ZOHO_PAYMENTS',
+    extraNote: isSuccess
+      ? `Zoho Payment ID: ${zohoPaymentId || paymentLinkId || txnid} · Verified`
+      : `Zoho Status: ${zohoStatus || 'FAILED'}`,
+  });
+
+  return {
+    verified: signatureVerified,
     status: isSuccess ? 'success' : isPending ? 'pending' : 'failure',
     payment: updatedPayment[0],
     order: updatedOrder[0],

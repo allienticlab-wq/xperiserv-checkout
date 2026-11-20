@@ -5,6 +5,18 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import { notificationLogs, systemSettings } from '../db/schema.ts';
 
+export type ZohoCpaasRegion =
+  | 'IN'
+  | 'COM'
+  | 'EU'
+  | 'AU'
+  | 'CA'
+  | 'JP'
+  | 'AE'
+  | 'SG'
+  | 'UK'
+  | 'SA';
+
 export interface TransactionalEmailInput {
   eventType:
     | 'payment.success'
@@ -27,15 +39,17 @@ export interface TransactionalEmailInput {
   precomputedStatus?: string;
 }
 
-export interface MailgunConnectionConfig {
+export interface ZohoCpaasMailConfig {
+  zohoRegion: ZohoCpaasRegion;
+  sendMailToken: string; // Zoho CPaaS / ZeptoMail Send Mail Token (Zoho-enczapikey)
+  fromEmail: string;
+  fromName: string;
+  replyToEmail?: string;
   smtpHost: string;
   smtpPort: number;
-  mailgunDomain: string;
   smtpUser: string;
   smtpPassword?: string;
-  mailgunApiKey?: string;
-  mailgunRegion?: 'US' | 'EU';
-  smtpFrom: string;
+  testRecipient?: string;
 }
 
 export interface DiagnosticStep {
@@ -46,23 +60,96 @@ export interface DiagnosticStep {
   serverResponse?: string;
 }
 
-export interface MailgunDiagnosticResult {
+export interface ZohoCpaasDiagnosticResult {
   overallWorking: boolean;
-  smtpWorking: boolean;
   apiWorking: boolean;
+  smtpWorking: boolean;
   testedAt: string;
   summary: string;
   steps: DiagnosticStep[];
   emailDispatched: boolean;
-  queueMessageId?: string;
+  requestId?: string;
 }
 
-/**
- * Helper to read a complete SMTP multiline response from a socket (e.g. "250-..." followed by "250 ...").
- */
+const ZOHO_CPAAS_ENDPOINTS: Record<
+  ZohoCpaasRegion,
+  { restHost: string; restUrl: string; smtpHost: string }
+> = {
+  IN: {
+    restHost: 'cpaas.zoho.in',
+    restUrl: 'https://cpaas.zoho.in/v1.1/email',
+    smtpHost: 'smtp.zeptomail.in',
+  },
+  COM: {
+    restHost: 'cpaas.zoho.com',
+    restUrl: 'https://cpaas.zoho.com/v1.1/email',
+    smtpHost: 'smtp.zeptomail.com',
+  },
+  EU: {
+    restHost: 'cpaas.zoho.eu',
+    restUrl: 'https://cpaas.zoho.eu/v1.1/email',
+    smtpHost: 'smtp.zeptomail.eu',
+  },
+  AU: {
+    restHost: 'cpaas.zoho.com.au',
+    restUrl: 'https://cpaas.zoho.com.au/v1.1/email',
+    smtpHost: 'smtp.zeptomail.com.au',
+  },
+  CA: {
+    restHost: 'cpaas.zohocloud.ca',
+    restUrl: 'https://cpaas.zohocloud.ca/v1.1/email',
+    smtpHost: 'smtp.zeptomail.ca',
+  },
+  JP: {
+    restHost: 'cpaas.zoho.jp',
+    restUrl: 'https://cpaas.zoho.jp/v1.1/email',
+    smtpHost: 'smtp.zeptomail.jp',
+  },
+  AE: {
+    restHost: 'cpaas.zoho.ae',
+    restUrl: 'https://cpaas.zoho.ae/v1.1/email',
+    smtpHost: 'smtp.zeptomail.ae',
+  },
+  SG: {
+    restHost: 'cpaas.zoho.sg',
+    restUrl: 'https://cpaas.zoho.sg/v1.1/email',
+    smtpHost: 'smtp.zeptomail.sg',
+  },
+  UK: {
+    restHost: 'cpaas.zoho.uk',
+    restUrl: 'https://cpaas.zoho.uk/v1.1/email',
+    smtpHost: 'smtp.zeptomail.uk',
+  },
+  SA: {
+    restHost: 'cpaas.zoho.sa',
+    restUrl: 'https://cpaas.zoho.sa/v1.1/email',
+    smtpHost: 'smtp.zeptomail.sa',
+  },
+};
+
+export function normalizeZohoCpaasRegion(raw?: string): ZohoCpaasRegion {
+  const upper = String(raw || 'IN').trim().toUpperCase();
+  if (upper in ZOHO_CPAAS_ENDPOINTS) {
+    return upper as ZohoCpaasRegion;
+  }
+  if (upper === 'US') return 'COM';
+  return 'IN';
+}
+
+export function getZohoCpaasEndpoints(region?: string) {
+  const r = normalizeZohoCpaasRegion(region);
+  return ZOHO_CPAAS_ENDPOINTS[r] || ZOHO_CPAAS_ENDPOINTS.IN;
+}
+
+function cleanEnczApiKey(raw?: string): string {
+  return String(raw || '')
+    .replace(/^Zoho-enczapikey\s+/i, '')
+    .trim();
+}
+
 function readSmtpResponse(
   socket: net.Socket | tls.TLSSocket,
-  timeoutMs = 8000
+  timeoutMs = 7000
 ): Promise<{ code: number; raw: string }> {
   return new Promise((resolve, reject) => {
     let buffer = '';
@@ -76,7 +163,6 @@ function readSmtpResponse(
       const lines = buffer.split(/\r?\n/).filter((l) => l.length > 0);
       if (lines.length === 0) return;
       const lastLine = lines[lines.length - 1];
-      // Standard SMTP final line has 3 digits followed by space (e.g. "220 ", "250 ", "235 ", "334 ", "535 ")
       if (/^\d{3}(\s|$)/.test(lastLine)) {
         cleanup();
         const code = parseInt(lastLine.slice(0, 3), 10);
@@ -110,7 +196,7 @@ function readSmtpResponse(
 async function sendSmtpCommand(
   socket: net.Socket | tls.TLSSocket,
   command: string,
-  timeoutMs = 8000
+  timeoutMs = 7000
 ): Promise<{ code: number; raw: string }> {
   const responsePromise = readSmtpResponse(socket, timeoutMs);
   socket.write(`${command}\r\n`);
@@ -118,413 +204,388 @@ async function sendSmtpCommand(
 }
 
 export class NotificationService {
-  static async getSavedMailgunConfig(): Promise<MailgunConnectionConfig> {
+  static async getSavedZohoCpaasConfig(): Promise<ZohoCpaasMailConfig> {
+    const defaultRegion = normalizeZohoCpaasRegion(process.env.ZOHO_CPAAS_REGION || 'IN');
+    const defaultEndpoints = getZohoCpaasEndpoints(defaultRegion);
+
     try {
       const rows = await db
         .select()
         .from(systemSettings)
-        .where(eq(systemSettings.settingKey, 'mailgun_smtp_config'));
+        .where(eq(systemSettings.settingKey, 'zoho_cpaas_mail_config'));
       if (rows[0]) {
         const parsed = JSON.parse(rows[0].settingValueJson);
+        const reg = normalizeZohoCpaasRegion(parsed.zohoRegion || defaultRegion);
+        const ep = getZohoCpaasEndpoints(reg);
         return {
-          smtpHost: parsed.smtpHost || process.env.SMTP_HOST || 'smtp.mailgun.org',
-          smtpPort: Number(parsed.smtpPort || process.env.SMTP_PORT || 587),
-          mailgunDomain: parsed.mailgunDomain || process.env.MAILGUN_DOMAIN || 'mg.xperiserv.in',
-          smtpUser: parsed.smtpUser || process.env.SMTP_USER || 'postmaster@mg.xperiserv.in',
-          smtpPassword: parsed.smtpPassword || process.env.SMTP_PASSWORD || '',
-          mailgunApiKey: parsed.mailgunApiKey || process.env.MAILGUN_API_KEY || '',
-          mailgunRegion: parsed.mailgunRegion === 'EU' ? 'EU' : 'US',
-          smtpFrom:
-            parsed.smtpFrom ||
-            process.env.SMTP_FROM ||
-            'Allientic Checkout <checkout@mg.xperiserv.in>',
+          zohoRegion: reg,
+          sendMailToken: cleanEnczApiKey(
+            parsed.sendMailToken ?? process.env.ZOHO_CPAAS_SEND_MAIL_TOKEN ?? ''
+          ),
+          fromEmail: (
+            parsed.fromEmail ||
+            process.env.ZOHO_CPAAS_FROM_EMAIL ||
+            'checkout@xperiserv.in'
+          ).trim(),
+          fromName: (
+            parsed.fromName ||
+            process.env.ZOHO_CPAAS_FROM_NAME ||
+            'Allientic Checkout'
+          ).trim(),
+          replyToEmail: (parsed.replyToEmail || process.env.ZOHO_CPAAS_REPLY_TO || '').trim(),
+          smtpHost: (parsed.smtpHost || process.env.ZOHO_CPAAS_SMTP_HOST || ep.smtpHost).trim(),
+          smtpPort: Number(parsed.smtpPort || process.env.ZOHO_CPAAS_SMTP_PORT || 587),
+          smtpUser: (parsed.smtpUser || process.env.ZOHO_CPAAS_SMTP_USER || 'emailapikey').trim(),
+          smtpPassword: (parsed.smtpPassword || process.env.ZOHO_CPAAS_SMTP_PASSWORD || '').trim(),
+          testRecipient: (parsed.testRecipient || 'admin@xperiserv.in').trim(),
         };
       }
     } catch {
-      // fallback to env
+      // Fallback to env defaults
     }
+
     return {
-      smtpHost: process.env.SMTP_HOST || 'smtp.mailgun.org',
-      smtpPort: Number(process.env.SMTP_PORT || 587),
-      mailgunDomain: process.env.MAILGUN_DOMAIN || 'mg.xperiserv.in',
-      smtpUser: process.env.SMTP_USER || 'postmaster@mg.xperiserv.in',
-      smtpPassword: process.env.SMTP_PASSWORD || '',
-      mailgunApiKey: process.env.MAILGUN_API_KEY || '',
-      mailgunRegion: 'US',
-      smtpFrom: process.env.SMTP_FROM || 'Allientic Checkout <checkout@mg.xperiserv.in>',
+      zohoRegion: defaultRegion,
+      sendMailToken: cleanEnczApiKey(process.env.ZOHO_CPAAS_SEND_MAIL_TOKEN || ''),
+      fromEmail: (process.env.ZOHO_CPAAS_FROM_EMAIL || 'checkout@xperiserv.in').trim(),
+      fromName: (process.env.ZOHO_CPAAS_FROM_NAME || 'Allientic Checkout').trim(),
+      replyToEmail: (process.env.ZOHO_CPAAS_REPLY_TO || '').trim(),
+      smtpHost: (process.env.ZOHO_CPAAS_SMTP_HOST || defaultEndpoints.smtpHost).trim(),
+      smtpPort: Number(process.env.ZOHO_CPAAS_SMTP_PORT || 587),
+      smtpUser: (process.env.ZOHO_CPAAS_SMTP_USER || 'emailapikey').trim(),
+      smtpPassword: (process.env.ZOHO_CPAAS_SMTP_PASSWORD || '').trim(),
+      testRecipient: 'admin@xperiserv.in',
     };
   }
 
   /**
-   * Executes a live step-by-step diagnostic check of Mailgun DNS, SMTP Port, STARTTLS,
-   * SMTP AUTH LOGIN (Username + Password), and optional Mailgun REST API Key, plus optional live email send.
+   * Executes live Zoho CPaaS Transactional Email diagnostics & optional live email send:
+   * 1. DNS check for Zoho CPaaS REST API host (`cpaas.zoho.{dc}`)
+   * 2. Live Zoho CPaaS REST API `/v1.1/email` call (`Authorization: Zoho-enczapikey ...`)
+   * 3. Optional live Zoho CPaaS / ZeptoMail SMTP TLS + AUTH LOGIN handshake
    */
   static async runLiveDiagnostics(options: {
-    config: MailgunConnectionConfig;
+    config: ZohoCpaasMailConfig;
     sendTestEmailTo?: string;
     subject?: string;
     htmlBody?: string;
-  }): Promise<MailgunDiagnosticResult> {
+  }): Promise<ZohoCpaasDiagnosticResult> {
     const { config, sendTestEmailTo, subject, htmlBody } = options;
+    const region = normalizeZohoCpaasRegion(config.zohoRegion);
+    const ep = getZohoCpaasEndpoints(region);
+    const token = cleanEnczApiKey(config.sendMailToken);
     const steps: DiagnosticStep[] = [];
-    let smtpWorking = false;
     let apiWorking = false;
+    let smtpWorking = false;
     let emailDispatched = false;
-    let queueMessageId: string | undefined;
+    let requestId: string | undefined;
 
-    // 1. DNS Resolution Check for SMTP Host
+    // 1. DNS Resolution Check for Zoho CPaaS REST API host
     const dnsStart = Date.now();
     try {
-      const lookup = await dns.promises.lookup(config.smtpHost);
+      const lookup = await dns.promises.lookup(ep.restHost);
       steps.push({
-        step: `1. DNS Resolution (${config.smtpHost})`,
+        step: `1. Zoho CPaaS DNS Resolution (${ep.restHost})`,
         status: 'PASS',
         latencyMs: Date.now() - dnsStart,
-        detail: `Resolved ${config.smtpHost} → ${lookup.address} (IPv${lookup.family})`,
+        detail: `Resolved ${ep.restHost} → ${lookup.address} (IPv${lookup.family})`,
       });
     } catch (err: any) {
       steps.push({
-        step: `1. DNS Resolution (${config.smtpHost})`,
+        step: `1. Zoho CPaaS DNS Resolution (${ep.restHost})`,
         status: 'FAIL',
         latencyMs: Date.now() - dnsStart,
-        detail: `Failed to resolve hostname ${config.smtpHost}: ${err.message}`,
+        detail: `Failed to resolve ${ep.restHost}: ${err.message}`,
       });
     }
 
-    // 2. Live SMTP Socket, STARTTLS & AUTH LOGIN Check
-    let activeSocket: net.Socket | tls.TLSSocket | null = null;
-    const tcpStart = Date.now();
-    try {
-      const isImplicitTls = Number(config.smtpPort) === 465;
-      const connectedSocket = await new Promise<net.Socket | tls.TLSSocket>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          reject(
-            new Error(
-              `Connection to ${config.smtpHost}:${config.smtpPort} timed out (port may be blocked by firewall)`
-            )
-          );
-        }, 8000);
-
-        const onConnect = (sock: net.Socket | tls.TLSSocket) => {
-          clearTimeout(timer);
-          resolve(sock);
-        };
-
-        if (isImplicitTls) {
-          const tlsSock = tls.connect(
-            {
-              host: config.smtpHost,
-              port: Number(config.smtpPort),
-              servername: config.smtpHost,
-            },
-            () => onConnect(tlsSock)
-          );
-          tlsSock.once('error', (e) => {
-            clearTimeout(timer);
-            reject(e);
-          });
-        } else {
-          const rawSock = net.createConnection(
-            { host: config.smtpHost, port: Number(config.smtpPort) },
-            () => onConnect(rawSock)
-          );
-          rawSock.once('error', (e) => {
-            clearTimeout(timer);
-            reject(e);
-          });
-        }
-      });
-
-      activeSocket = connectedSocket;
-      const banner = await readSmtpResponse(activeSocket, 8000);
-      if (banner.code !== 220) {
-        throw new Error(`Unexpected SMTP banner (${banner.code}): ${banner.raw}`);
-      }
+    // 2. Zoho CPaaS HTTP REST API v1.1 (`POST https://cpaas.zoho.{dc}/v1.1/email`)
+    const apiStart = Date.now();
+    if (!token) {
       steps.push({
-        step: `2. SMTP TCP Handshake (${config.smtpHost}:${config.smtpPort})`,
-        status: 'PASS',
-        latencyMs: Date.now() - tcpStart,
-        detail: `Connected to Mailgun SMTP relay on port ${config.smtpPort}`,
-        serverResponse: banner.raw.split(/\r?\n/)[0],
-      });
-
-      // 3. EHLO & STARTTLS Upgrade
-      const tlsStart = Date.now();
-      const ehlo1 = await sendSmtpCommand(activeSocket, 'EHLO checkout.xperiserv.in');
-      if (ehlo1.code !== 250) {
-        throw new Error(`EHLO rejected: ${ehlo1.raw}`);
-      }
-
-      if (!isImplicitTls && ehlo1.raw.toUpperCase().includes('STARTTLS')) {
-        const startTlsRes = await sendSmtpCommand(activeSocket, 'STARTTLS');
-        if (startTlsRes.code !== 220) {
-          throw new Error(`STARTTLS failed: ${startTlsRes.raw}`);
-        }
-        const upgradedSocket = await new Promise<tls.TLSSocket>((resolve, reject) => {
-          const tlsSock = tls.connect(
-            {
-              socket: activeSocket as net.Socket,
-              servername: config.smtpHost,
-            },
-            () => resolve(tlsSock)
-          );
-          tlsSock.once('error', reject);
-        });
-        activeSocket = upgradedSocket;
-        const cipher = upgradedSocket.getCipher();
-        const proto = upgradedSocket.getProtocol();
-        await sendSmtpCommand(activeSocket, 'EHLO checkout.xperiserv.in');
-        steps.push({
-          step: '3. STARTTLS Encryption Upgrade',
-          status: 'PASS',
-          latencyMs: Date.now() - tlsStart,
-          detail: `Negotiated ${proto || 'TLS'} (${cipher?.name || 'AEAD Cipher'})`,
-          serverResponse: startTlsRes.raw.split(/\r?\n/)[0],
-        });
-      } else {
-        steps.push({
-          step: '3. TLS Channel Security',
-          status: 'PASS',
-          latencyMs: Date.now() - tlsStart,
-          detail: isImplicitTls ? 'Implicit TLS (Port 465) active' : 'EHLO capabilities verified',
-        });
-      }
-
-      // 4. SMTP AUTH LOGIN Verification (Username + Password)
-      const authStart = Date.now();
-      if (!config.smtpPassword || !config.smtpPassword.trim()) {
-        steps.push({
-          step: `4. SMTP Authentication (${config.smtpUser})`,
-          status: 'FAIL',
-          latencyMs: 0,
-          detail:
-            'Mailgun SMTP Password is empty. Enter your Mailgun SMTP password above and click Test Connection.',
-        });
-      } else {
-        const authInit = await sendSmtpCommand(activeSocket, 'AUTH LOGIN');
-        if (authInit.code !== 334) {
-          throw new Error(`AUTH LOGIN not accepted: ${authInit.raw}`);
-        }
-        const userStep = await sendSmtpCommand(
-          activeSocket,
-          Buffer.from(config.smtpUser.trim(), 'utf8').toString('base64')
-        );
-        if (userStep.code !== 334) {
-          throw new Error(`SMTP Username rejected: ${userStep.raw}`);
-        }
-        const passStep = await sendSmtpCommand(
-          activeSocket,
-          Buffer.from(config.smtpPassword.trim(), 'utf8').toString('base64')
-        );
-        if (passStep.code === 235) {
-          smtpWorking = true;
-          steps.push({
-            step: `4. SMTP Authentication (${config.smtpUser})`,
-            status: 'PASS',
-            latencyMs: Date.now() - authStart,
-            detail: `Authenticated successfully with Mailgun SMTP (${config.smtpUser})`,
-            serverResponse: passStep.raw.split(/\r?\n/)[0],
-          });
-        } else {
-          steps.push({
-            step: `4. SMTP Authentication (${config.smtpUser})`,
-            status: 'FAIL',
-            latencyMs: Date.now() - authStart,
-            detail: `Mailgun rejected SMTP username or password (code ${passStep.code}). Check your postmaster credentials for ${config.mailgunDomain}.`,
-            serverResponse: passStep.raw.split(/\r?\n/)[0],
-          });
-        }
-      }
-
-      // 5. Optional Live Email Dispatch over Authenticated SMTP Socket
-      if (smtpWorking && sendTestEmailTo && htmlBody) {
-        const sendStart = Date.now();
-        try {
-          const fromMatch = config.smtpFrom.match(/<([^>]+)>/);
-          const envelopeFrom = fromMatch ? fromMatch[1] : config.smtpUser;
-          const mailFromRes = await sendSmtpCommand(activeSocket, `MAIL FROM:<${envelopeFrom}>`);
-          if (mailFromRes.code !== 250) {
-            throw new Error(`MAIL FROM rejected: ${mailFromRes.raw}`);
-          }
-          const rcptRes = await sendSmtpCommand(
-            activeSocket,
-            `RCPT TO:<${sendTestEmailTo.trim()}>`
-          );
-          if (rcptRes.code !== 250 && rcptRes.code !== 251) {
-            throw new Error(`RCPT TO rejected: ${rcptRes.raw}`);
-          }
-          const dataInit = await sendSmtpCommand(activeSocket, 'DATA');
-          if (dataInit.code !== 354) {
-            throw new Error(`DATA command rejected: ${dataInit.raw}`);
-          }
-
-          const mimeMessage = [
-            `From: ${config.smtpFrom}`,
-            `To: <${sendTestEmailTo.trim()}>`,
-            `Subject: ${subject || '[Allientic Checkout] Live Mailgun SMTP Verification'}`,
-            `MIME-Version: 1.0`,
-            `Content-Type: text/html; charset=UTF-8`,
-            `Date: ${new Date().toUTCString()}`,
-            ``,
-            htmlBody.replace(/\r?\n\./g, '\r\n..'),
-            `.`,
-          ].join('\r\n');
-
-          const dataComplete = await sendSmtpCommand(activeSocket, mimeMessage, 12000);
-          if (dataComplete.code === 250) {
-            emailDispatched = true;
-            queueMessageId = dataComplete.raw.split(/\r?\n/)[0];
-            steps.push({
-              step: `5. Live SMTP Email Dispatch (${sendTestEmailTo})`,
-              status: 'PASS',
-              latencyMs: Date.now() - sendStart,
-              detail: `Message accepted by Mailgun SMTP queue for delivery to ${sendTestEmailTo}`,
-              serverResponse: queueMessageId,
-            });
-          } else {
-            steps.push({
-              step: `5. Live SMTP Email Dispatch (${sendTestEmailTo})`,
-              status: 'FAIL',
-              latencyMs: Date.now() - sendStart,
-              detail: `Mailgun rejected message body (code ${dataComplete.code})`,
-              serverResponse: dataComplete.raw.split(/\r?\n/)[0],
-            });
-          }
-        } catch (sendErr: any) {
-          steps.push({
-            step: `5. Live SMTP Email Dispatch (${sendTestEmailTo})`,
-            status: 'FAIL',
-            latencyMs: Date.now() - sendStart,
-            detail: sendErr.message || 'Failed during SMTP DATA transmission',
-          });
-        }
-      }
-
-      try {
-        await sendSmtpCommand(activeSocket, 'QUIT', 2000);
-      } catch {
-        // ignore QUIT timeout
-      }
-      activeSocket.destroy();
-    } catch (smtpErr: any) {
-      if (activeSocket) {
-        activeSocket.destroy();
-      }
-      steps.push({
-        step: `2. SMTP Connection (${config.smtpHost}:${config.smtpPort})`,
+        step: `2. Zoho CPaaS REST API (${ep.restUrl})`,
         status: 'FAIL',
-        latencyMs: Date.now() - tcpStart,
-        detail: smtpErr.message || 'Unable to connect to Mailgun SMTP server',
+        latencyMs: 0,
+        detail:
+          'Zoho CPaaS Send Mail Token (Zoho-enczapikey) is empty. Paste your token from Zoho CPaaS / ZeptoMail Mail Agents and try again.',
       });
-    }
-
-    // 6. Optional Mailgun HTTP REST API Key Check (if Mailgun API Key is provided)
-    if (config.mailgunApiKey && config.mailgunApiKey.trim()) {
-      const apiStart = Date.now();
-      const baseUrl =
-        config.mailgunRegion === 'EU' ? 'https://api.eu.mailgun.net' : 'https://api.mailgun.net';
-      const authHeader = `Basic ${Buffer.from(`api:${config.mailgunApiKey.trim()}`).toString('base64')}`;
-
+    } else {
       try {
-        if (sendTestEmailTo && htmlBody && !emailDispatched) {
-          // Attempt live send via Mailgun HTTP v3 Messages API
-          const form = new URLSearchParams();
-          form.append('from', config.smtpFrom);
-          form.append('to', sendTestEmailTo.trim());
-          form.append('subject', subject || '[Allientic Checkout] Live Mailgun API Verification');
-          form.append('html', htmlBody);
+        if (sendTestEmailTo && htmlBody) {
+          const payload: Record<string, any> = {
+            from: {
+              address: config.fromEmail.trim(),
+              name: config.fromName?.trim() || 'Allientic Checkout',
+            },
+            to: [
+              {
+                email_address: {
+                  address: sendTestEmailTo.trim(),
+                  name: sendTestEmailTo.split('@')[0] || 'Recipient',
+                },
+              },
+            ],
+            subject: subject || '[Allientic Checkout] Zoho CPaaS Live Email Verification',
+            htmlbody: htmlBody,
+          };
+          if (config.replyToEmail?.trim()) {
+            payload.reply_to = [{ address: config.replyToEmail.trim() }];
+          }
 
-          const resp = await fetch(`${baseUrl}/v3/${config.mailgunDomain}/messages`, {
+          const resp = await fetch(ep.restUrl, {
             method: 'POST',
             headers: {
-              Authorization: authHeader,
-              'Content-Type': 'application/x-www-form-urlencoded',
+              Accept: 'application/json',
+              'Content-Type': 'application/json',
+              Authorization: `Zoho-enczapikey ${token}`,
             },
-            body: form.toString(),
+            body: JSON.stringify(payload),
           });
           const bodyText = await resp.text();
+          let parsed: any = {};
+          try {
+            parsed = JSON.parse(bodyText);
+          } catch {
+            parsed = { rawText: bodyText };
+          }
+
           if (resp.ok) {
             apiWorking = true;
             emailDispatched = true;
+            requestId = parsed?.request_id || parsed?.data?.[0]?.request_id;
             steps.push({
-              step: `Mailgun HTTP REST API (${baseUrl}/v3/${config.mailgunDomain})`,
+              step: `2. Zoho CPaaS Live Email Dispatch (${ep.restUrl})`,
               status: 'PASS',
               latencyMs: Date.now() - apiStart,
-              detail: `HTTP ${resp.status} OK — API Key verified & message queued via REST API`,
-              serverResponse: bodyText.slice(0, 160),
+              detail: `HTTP ${resp.status} OK — Zoho CPaaS queued email to ${sendTestEmailTo}`,
+              serverResponse: bodyText.slice(0, 180),
             });
           } else {
+            const errMsg =
+              parsed?.error?.details?.[0]?.message ||
+              parsed?.error?.message ||
+              parsed?.message ||
+              bodyText;
             steps.push({
-              step: `Mailgun HTTP REST API (${baseUrl}/v3/${config.mailgunDomain})`,
+              step: `2. Zoho CPaaS Live Email Dispatch (${ep.restUrl})`,
               status: 'FAIL',
               latencyMs: Date.now() - apiStart,
-              detail: `HTTP ${resp.status} — Mailgun REST API rejected request`,
-              serverResponse: bodyText.slice(0, 160),
+              detail: `HTTP ${resp.status} — Zoho CPaaS rejected request: ${errMsg}`,
+              serverResponse: bodyText.slice(0, 180),
             });
           }
         } else {
-          // Verify domain status via GET /v3/domains/:domain
-          const resp = await fetch(`${baseUrl}/v3/domains/${config.mailgunDomain}`, {
-            method: 'GET',
-            headers: { Authorization: authHeader },
+          // Non-sending token probe: send malformed empty body to test Zoho-enczapikey auth response
+          const resp = await fetch(ep.restUrl, {
+            method: 'POST',
+            headers: {
+              Accept: 'application/json',
+              'Content-Type': 'application/json',
+              Authorization: `Zoho-enczapikey ${token}`,
+            },
+            body: JSON.stringify({
+              from: { address: config.fromEmail.trim() },
+            }),
           });
           const bodyText = await resp.text();
-          if (resp.ok) {
+          let parsed: any = {};
+          try {
+            parsed = JSON.parse(bodyText);
+          } catch {
+            parsed = { rawText: bodyText };
+          }
+
+          const errCode = String(parsed?.error?.code || '');
+          const isAuthFailure =
+            resp.status === 401 ||
+            resp.status === 403 ||
+            errCode.toUpperCase().includes('INVALID_APIKEY') ||
+            errCode.toUpperCase().includes('UNAUTHOR');
+
+          if (!isAuthFailure && resp.status < 500) {
             apiWorking = true;
             steps.push({
-              step: `Mailgun HTTP REST API (${baseUrl}/v3/domains/${config.mailgunDomain})`,
+              step: `2. Zoho CPaaS Token Auth Probe (${ep.restUrl})`,
               status: 'PASS',
               latencyMs: Date.now() - apiStart,
-              detail: `HTTP ${resp.status} OK — Mailgun Private API Key & domain verified`,
-              serverResponse: bodyText.slice(0, 160),
+              detail: `Zoho CPaaS endpoint reachable & Send Mail Token authenticated (${region} region).`,
+              serverResponse: bodyText.slice(0, 180),
             });
           } else {
             steps.push({
-              step: `Mailgun HTTP REST API (${baseUrl}/v3/domains/${config.mailgunDomain})`,
+              step: `2. Zoho CPaaS Token Auth Probe (${ep.restUrl})`,
               status: 'FAIL',
               latencyMs: Date.now() - apiStart,
-              detail: `HTTP ${resp.status} — Invalid Mailgun API Key or domain not found in ${config.mailgunRegion || 'US'} region`,
-              serverResponse: bodyText.slice(0, 160),
+              detail: `HTTP ${resp.status} — Zoho CPaaS rejected Send Mail Token in ${region} region.`,
+              serverResponse: bodyText.slice(0, 180),
             });
           }
         }
       } catch (apiErr: any) {
         steps.push({
-          step: `Mailgun HTTP REST API (${baseUrl})`,
+          step: `2. Zoho CPaaS REST API (${ep.restUrl})`,
           status: 'FAIL',
           latencyMs: Date.now() - apiStart,
-          detail: `REST API network error: ${apiErr.message}`,
+          detail: `REST API error: ${apiErr.message}`,
+        });
+      }
+    }
+
+    // 3. Optional Zoho CPaaS / ZeptoMail SMTP Relay Check (only when SMTP credentials configured & not already failed)
+    const effectiveSmtpHost = (config.smtpHost || ep.smtpHost).trim();
+    const effectiveSmtpPort = Number(config.smtpPort || 587);
+    const effectiveSmtpPass = (config.smtpPassword || token || '').trim();
+
+    if (effectiveSmtpHost && config.smtpUser?.trim() && effectiveSmtpPass) {
+      const smtpStart = Date.now();
+      let activeSocket: net.Socket | tls.TLSSocket | null = null;
+      try {
+        const isImplicitTls = effectiveSmtpPort === 465;
+        const connectedSocket = await new Promise<net.Socket | tls.TLSSocket>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            reject(
+              new Error(
+                `SMTP connection to ${effectiveSmtpHost}:${effectiveSmtpPort} timed out (cloud egress port may be restricted; REST API HTTPS 443 recommended)`
+              )
+            );
+          }, 5000);
+
+          if (isImplicitTls) {
+            const tlsSock = tls.connect(
+              { host: effectiveSmtpHost, port: effectiveSmtpPort, servername: effectiveSmtpHost },
+              () => {
+                clearTimeout(timer);
+                resolve(tlsSock);
+              }
+            );
+            tlsSock.once('error', (e) => {
+              clearTimeout(timer);
+              reject(e);
+            });
+          } else {
+            const rawSock = net.createConnection(
+              { host: effectiveSmtpHost, port: effectiveSmtpPort },
+              () => {
+                clearTimeout(timer);
+                resolve(rawSock);
+              }
+            );
+            rawSock.once('error', (e) => {
+              clearTimeout(timer);
+              reject(e);
+            });
+          }
+        });
+
+        activeSocket = connectedSocket;
+        const banner = await readSmtpResponse(activeSocket, 5000);
+        if (banner.code !== 220) {
+          throw new Error(`Unexpected SMTP banner (${banner.code}): ${banner.raw}`);
+        }
+        const ehlo1 = await sendSmtpCommand(activeSocket, 'EHLO checkout.xperiserv.in', 5000);
+        if (!isImplicitTls && ehlo1.raw.toUpperCase().includes('STARTTLS')) {
+          const stls = await sendSmtpCommand(activeSocket, 'STARTTLS', 5000);
+          if (stls.code !== 220) throw new Error(`STARTTLS failed: ${stls.raw}`);
+          const upgraded = await new Promise<tls.TLSSocket>((resolve, reject) => {
+            const tlsSock = tls.connect(
+              { socket: activeSocket as net.Socket, servername: effectiveSmtpHost },
+              () => resolve(tlsSock)
+            );
+            tlsSock.once('error', reject);
+          });
+          activeSocket = upgraded;
+          await sendSmtpCommand(activeSocket, 'EHLO checkout.xperiserv.in', 5000);
+        }
+
+        const authInit = await sendSmtpCommand(activeSocket, 'AUTH LOGIN', 5000);
+        if (authInit.code !== 334) throw new Error(`AUTH LOGIN rejected: ${authInit.raw}`);
+        await sendSmtpCommand(
+          activeSocket,
+          Buffer.from(config.smtpUser.trim(), 'utf8').toString('base64'),
+          5000
+        );
+        const passStep = await sendSmtpCommand(
+          activeSocket,
+          Buffer.from(effectiveSmtpPass, 'utf8').toString('base64'),
+          5000
+        );
+        if (passStep.code === 235) {
+          smtpWorking = true;
+          steps.push({
+            step: `3. Zoho SMTP Relay (${effectiveSmtpHost}:${effectiveSmtpPort})`,
+            status: 'PASS',
+            latencyMs: Date.now() - smtpStart,
+            detail: `STARTTLS + SMTP AUTH LOGIN succeeded as ${config.smtpUser}`,
+            serverResponse: passStep.raw.split(/\r?\n/)[0],
+          });
+
+          if (!emailDispatched && sendTestEmailTo && htmlBody) {
+            await sendSmtpCommand(activeSocket, `MAIL FROM:<${config.fromEmail.trim()}>`);
+            await sendSmtpCommand(activeSocket, `RCPT TO:<${sendTestEmailTo.trim()}>`);
+            await sendSmtpCommand(activeSocket, 'DATA');
+            const mime = [
+              `From: ${config.fromName ? `"${config.fromName}" ` : ''}<${config.fromEmail.trim()}>`,
+              `To: <${sendTestEmailTo.trim()}>`,
+              `Subject: ${subject || '[Allientic Checkout] Zoho CPaaS SMTP Verification'}`,
+              `MIME-Version: 1.0`,
+              `Content-Type: text/html; charset=UTF-8`,
+              `Date: ${new Date().toUTCString()}`,
+              ``,
+              htmlBody.replace(/\r?\n\./g, '\r\n..'),
+              `.`,
+            ].join('\r\n');
+            const done = await sendSmtpCommand(activeSocket, mime, 10000);
+            if (done.code === 250) {
+              emailDispatched = true;
+            }
+          }
+        } else {
+          steps.push({
+            step: `3. Zoho SMTP Relay (${effectiveSmtpHost}:${effectiveSmtpPort})`,
+            status: apiWorking ? 'SKIP' : 'FAIL',
+            latencyMs: Date.now() - smtpStart,
+            detail: `SMTP AUTH returned ${passStep.code}: ${passStep.raw.split(/\r?\n/)[0]}`,
+          });
+        }
+
+        try {
+          await sendSmtpCommand(activeSocket, 'QUIT', 1500);
+        } catch {
+          // ignore
+        }
+        activeSocket.destroy();
+      } catch (smtpErr: any) {
+        if (activeSocket) activeSocket.destroy();
+        steps.push({
+          step: `3. Zoho SMTP Relay (${effectiveSmtpHost}:${effectiveSmtpPort})`,
+          status: apiWorking ? 'SKIP' : 'FAIL',
+          latencyMs: Date.now() - smtpStart,
+          detail: smtpErr.message || 'Zoho SMTP probe failed',
         });
       }
     } else {
       steps.push({
-        step: 'Mailgun HTTP REST API Key Check (Optional)',
+        step: '3. Zoho SMTP Relay Fallback (Optional)',
         status: 'SKIP',
         latencyMs: 0,
-        detail:
-          'No Mailgun Private API Key entered (using SMTP Login & Password mode). Enter an API key if you also want to verify REST API v3.',
+        detail: 'Using Zoho CPaaS HTTPS REST API v1.1 primary channel.',
       });
     }
 
-    const overallWorking = smtpWorking || apiWorking;
+    const overallWorking = apiWorking || smtpWorking;
     const summary = overallWorking
-      ? `CONNECTED & VERIFIED: ${[
-          smtpWorking ? `SMTP Auth (${config.smtpUser})` : null,
-          apiWorking ? `REST API v3 (${config.mailgunDomain})` : null,
-        ]
-          .filter(Boolean)
-          .join(' + ')} working.`
-      : 'NOT WORKING: Mailgun authentication or connection failed. Review the failed diagnostic step(s) below.';
+      ? `CONNECTED & VERIFIED: Zoho CPaaS (${region} · ${apiWorking ? ep.restHost : effectiveSmtpHost}) ready.`
+      : 'NOT WORKING: Zoho CPaaS Send Mail Token or region authentication failed. Check diagnostic step details below.';
 
     return {
       overallWorking,
-      smtpWorking,
       apiWorking,
+      smtpWorking,
       testedAt: new Date().toISOString(),
       summary,
       steps,
       emailDispatched,
-      queueMessageId,
+      requestId,
     };
   }
 
@@ -626,7 +687,7 @@ export class NotificationService {
     ${input.gatewayName ? `<div class="row"><span>Payment Gateway</span><strong style="color:#f8fafc;">${input.gatewayName}</strong></div>` : ''}
     ${input.extraNote ? `<p style="font-size: 13px; color: #94a3b8; margin-top: 16px;">${input.extraNote}</p>` : ''}
     <div class="footer">
-      Allientic Lab Technologies · Self-Hosted Payment Infrastructure<br/>
+      Allientic Lab Technologies · Zoho CPaaS Transactional Mailer<br/>
       https://checkout.xperiserv.in · Automated Transactional Receipt
     </div>
   </div>
@@ -639,10 +700,11 @@ export class NotificationService {
   static async sendAndLog(input: TransactionalEmailInput) {
     try {
       const { subject, html, templateName } = this.buildBrandedHtml(input);
-      const config = await this.getSavedMailgunConfig();
+      const config = await this.getSavedZohoCpaasConfig();
+      const ep = getZohoCpaasEndpoints(config.zohoRegion);
 
-      let deliveryStatus = input.precomputedStatus || 'Logged (SMTP Password Not Set)';
-      if (!input.precomputedStatus && (config.smtpPassword || config.mailgunApiKey)) {
+      let deliveryStatus = input.precomputedStatus || 'Logged (Zoho CPaaS Token Not Set)';
+      if (!input.precomputedStatus && (config.sendMailToken || config.smtpPassword)) {
         const diag = await this.runLiveDiagnostics({
           config,
           sendTestEmailTo: input.recipientEmail,
@@ -650,12 +712,12 @@ export class NotificationService {
           htmlBody: html,
         });
         if (diag.emailDispatched) {
-          deliveryStatus = diag.smtpWorking
-            ? 'Delivered (Live Mailgun SMTP 250 OK)'
-            : 'Delivered (Live Mailgun REST API 200 OK)';
+          deliveryStatus = diag.apiWorking
+            ? 'Delivered (Live Zoho CPaaS REST API)'
+            : 'Delivered (Live Zoho CPaaS SMTP 250 OK)';
         } else {
           const failedStep = diag.steps.find((s) => s.status === 'FAIL');
-          deliveryStatus = `Failed (${failedStep?.step || 'Mailgun Auth Error'})`;
+          deliveryStatus = `Failed (${failedStep?.step || 'Zoho CPaaS Error'})`;
         }
       }
 
@@ -666,7 +728,7 @@ export class NotificationService {
           recipientEmail: input.recipientEmail,
           subject,
           status: deliveryStatus,
-          smtpHost: `${config.smtpHost}:${config.smtpPort}`,
+          smtpHost: ep.restHost,
           templateName,
           previewHtml: html,
         })

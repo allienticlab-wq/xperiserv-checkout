@@ -95,7 +95,7 @@ const SIDEBAR_ITEMS: Array<{ id: AdminSection; label: string; icon: React.Compon
   { id: 'payments', label: '6. Transactions', icon: CreditCard },
   { id: 'refunds', label: '7. Refunds', icon: RotateCcw },
   { id: 'gateways', label: '8. Payment Gateways', icon: Sliders },
-  { id: 'notifications', label: '9. Email Settings (Mailgun)', icon: Mail },
+  { id: 'notifications', label: '9. Email Settings (Zoho CPaaS)', icon: Mail },
   { id: 'policies', label: '10. Policies (xperiserv.in)', icon: FileText },
   { id: 'reports', label: '11. Reports & Analytics', icon: BarChart3 },
   { id: 'team', label: '12. Admin Users (RBAC)', icon: Users },
@@ -271,29 +271,30 @@ export default function App() {
   });
 
   const [selectedEmailPreview, setSelectedEmailPreview] = useState<any | null>(null);
-  const [mailgunConfig, setMailgunConfig] = useState({
-    smtpHost: 'smtp.mailgun.org',
+  const [zohoCpaasConfig, setZohoCpaasConfig] = useState({
+    zohoRegion: 'IN' as 'IN' | 'COM' | 'EU' | 'AU' | 'CA' | 'JP' | 'AE' | 'SG' | 'UK' | 'SA',
+    sendMailToken: '',
+    fromEmail: 'checkout@xperiserv.in',
+    fromName: 'Allientic Checkout',
+    replyToEmail: 'support@xperiserv.in',
+    smtpHost: 'smtp.zeptomail.in',
     smtpPort: '587',
-    mailgunDomain: 'mg.xperiserv.in',
-    smtpUser: 'postmaster@mg.xperiserv.in',
+    smtpUser: 'emailapikey',
     smtpPassword: '',
-    mailgunApiKey: '',
-    mailgunRegion: 'US' as 'US' | 'EU',
-    smtpFrom: 'Allientic Checkout <checkout@mg.xperiserv.in>',
     testRecipient: 'admin@xperiserv.in',
   });
-  const [showMailgunPassword, setShowMailgunPassword] = useState<boolean>(false);
-  const [savingMailgunConfig, setSavingMailgunConfig] = useState<boolean>(false);
-  const [verifyingMailgun, setVerifyingMailgun] = useState<boolean>(false);
-  const [sendingMailgunTest, setSendingMailgunTest] = useState<boolean>(false);
-  const [mailgunDiagnostics, setMailgunDiagnostics] = useState<{
+  const [showZohoCpaasToken, setShowZohoCpaasToken] = useState<boolean>(false);
+  const [savingZohoCpaasConfig, setSavingZohoCpaasConfig] = useState<boolean>(false);
+  const [verifyingZohoCpaas, setVerifyingZohoCpaas] = useState<boolean>(false);
+  const [sendingZohoCpaasTest, setSendingZohoCpaasTest] = useState<boolean>(false);
+  const [zohoCpaasDiagnostics, setZohoCpaasDiagnostics] = useState<{
     overallWorking: boolean;
-    smtpWorking: boolean;
     apiWorking: boolean;
+    smtpWorking: boolean;
     testedAt: string;
     summary: string;
     emailDispatched?: boolean;
-    queueMessageId?: string;
+    requestId?: string;
     steps: Array<{
       step: string;
       status: 'PASS' | 'FAIL' | 'SKIP';
@@ -319,6 +320,8 @@ export default function App() {
         publicKeyOrClientId: string;
         secretOrSalt: string;
         webhookSecret: string;
+        refreshToken: string;
+        zohoRegion: string;
         privateKeyId: string;
         publicKeyId: string;
         payglocalPublicKeyPem: string;
@@ -413,18 +416,19 @@ export default function App() {
         throw new Error(data.error || 'Failed to load platform data');
       }
       setSnapshot(data);
-      if (data.mailgunConfig) {
-        setMailgunConfig((prev) => ({
+      if (data.zohoCpaasConfig) {
+        setZohoCpaasConfig((prev) => ({
           ...prev,
-          smtpHost: data.mailgunConfig.smtpHost || prev.smtpHost,
-          smtpPort: data.mailgunConfig.smtpPort || prev.smtpPort,
-          mailgunDomain: data.mailgunConfig.mailgunDomain || prev.mailgunDomain,
-          smtpUser: data.mailgunConfig.smtpUser || prev.smtpUser,
-          smtpPassword: data.mailgunConfig.smtpPassword ?? prev.smtpPassword,
-          mailgunApiKey: data.mailgunConfig.mailgunApiKey ?? prev.mailgunApiKey,
-          mailgunRegion: data.mailgunConfig.mailgunRegion === 'EU' ? 'EU' : 'US',
-          smtpFrom: data.mailgunConfig.smtpFrom || prev.smtpFrom,
-          testRecipient: data.mailgunConfig.testRecipient || prev.testRecipient,
+          zohoRegion: (data.zohoCpaasConfig.zohoRegion || prev.zohoRegion) as any,
+          sendMailToken: data.zohoCpaasConfig.sendMailToken ?? prev.sendMailToken,
+          fromEmail: data.zohoCpaasConfig.fromEmail || prev.fromEmail,
+          fromName: data.zohoCpaasConfig.fromName || prev.fromName,
+          replyToEmail: data.zohoCpaasConfig.replyToEmail || prev.replyToEmail,
+          smtpHost: data.zohoCpaasConfig.smtpHost || prev.smtpHost,
+          smtpPort: String(data.zohoCpaasConfig.smtpPort || prev.smtpPort || '587'),
+          smtpUser: data.zohoCpaasConfig.smtpUser || prev.smtpUser,
+          smtpPassword: data.zohoCpaasConfig.smtpPassword ?? prev.smtpPassword,
+          testRecipient: data.zohoCpaasConfig.testRecipient || prev.testRecipient,
         }));
       }
       if (Array.isArray(data.gateways)) {
@@ -443,6 +447,11 @@ export default function App() {
                 gw.webhookSecret !== undefined
                   ? gw.webhookSecret
                   : prev[gw.code]?.webhookSecret || '',
+              refreshToken:
+                gw.refreshToken !== undefined
+                  ? gw.refreshToken
+                  : prev[gw.code]?.refreshToken || '',
+              zohoRegion: gw.zohoRegion || prev[gw.code]?.zohoRegion || 'IN',
               privateKeyId: gw.privateKeyId || prev[gw.code]?.privateKeyId || '',
               publicKeyId:
                 gw.publicKeyId ||
@@ -831,6 +840,8 @@ export default function App() {
       publicKeyOrClientId: gw.publicKeyOrClientId || '',
       secretOrSalt: gw.secretOrSalt || '',
       webhookSecret: gw.webhookSecret || '',
+      refreshToken: gw.refreshToken || '',
+      zohoRegion: gw.zohoRegion || 'IN',
       privateKeyId: gw.privateKeyId || '',
       publicKeyId: gw.publicKeyId || '',
       payglocalPublicKeyPem: gw.payglocalPublicKeyPem || '',
@@ -849,6 +860,8 @@ export default function App() {
         publicKeyOrClientId: effectivePublicKeyOrClientId,
         secretOrSalt: (draft.secretOrSalt || '').trim(),
         webhookSecret: (draft.webhookSecret || '').trim(),
+        refreshToken: (draft.refreshToken || '').trim(),
+        zohoRegion: draft.zohoRegion || 'IN',
         privateKeyId: (draft.privateKeyId || '').trim(),
         publicKeyId: (draft.publicKeyId || effectivePublicKeyOrClientId || '').trim(),
         payglocalPublicKeyPem: (draft.payglocalPublicKeyPem || '').trim(),
@@ -873,6 +886,8 @@ export default function App() {
               publicKeyOrClientId: data.gateway.publicKeyOrClientId || '',
               secretOrSalt: data.gateway.secretOrSalt || '',
               webhookSecret: data.gateway.webhookSecret || '',
+              refreshToken: data.gateway.refreshToken || draft.refreshToken || '',
+              zohoRegion: data.gateway.zohoRegion || draft.zohoRegion || 'IN',
               privateKeyId: data.gateway.privateKeyId || draft.privateKeyId || '',
               publicKeyId:
                 data.gateway.publicKeyId ||
@@ -913,6 +928,8 @@ export default function App() {
           publicKeyOrClientId: effectivePublicKeyOrClientId,
           secretOrSalt: (draft.secretOrSalt || '').trim(),
           webhookSecret: (draft.webhookSecret || '').trim(),
+          refreshToken: (draft.refreshToken || '').trim(),
+          zohoRegion: draft.zohoRegion || 'IN',
           privateKeyId: (draft.privateKeyId || '').trim(),
           publicKeyId: (draft.publicKeyId || effectivePublicKeyOrClientId || '').trim(),
           payglocalPublicKeyPem: (draft.payglocalPublicKeyPem || '').trim(),
@@ -1217,82 +1234,85 @@ export default function App() {
     }
   };
 
-  const handleSaveMailgunConfig = async (e?: React.FormEvent) => {
+  const handleSaveZohoCpaasConfig = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    setSavingMailgunConfig(true);
+    setSavingZohoCpaasConfig(true);
     try {
-      const res = await fetch('/api/v1/notifications/mailgun-config', {
+      const res = await fetch('/api/v1/notifications/zoho-cpaas-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(mailgunConfig),
+        body: JSON.stringify(zohoCpaasConfig),
       });
       const data = await res.json();
       if (res.ok) {
         await fetchPlatformData();
         showToast(
-          `Saved Mailgun SMTP & API credentials (${mailgunConfig.smtpUser} @ ${mailgunConfig.smtpHost}:${mailgunConfig.smtpPort})`
+          `Saved Zoho CPaaS email configuration (Region: ${zohoCpaasConfig.zohoRegion} · From: ${zohoCpaasConfig.fromEmail})`
         );
       } else {
-        showToast(data.error || 'Failed to save Mailgun settings');
+        showToast(data.error || 'Failed to save Zoho CPaaS email settings');
       }
     } finally {
-      setSavingMailgunConfig(false);
+      setSavingZohoCpaasConfig(false);
     }
   };
 
-  const handleVerifyMailgunConnection = async () => {
-    setVerifyingMailgun(true);
+  const handleVerifyZohoCpaasConnection = async () => {
+    setVerifyingZohoCpaas(true);
     try {
-      const res = await fetch('/api/v1/notifications/mailgun-verify', {
+      const res = await fetch('/api/v1/notifications/zoho-cpaas-verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(mailgunConfig),
+        body: JSON.stringify(zohoCpaasConfig),
       });
       const data = await res.json();
       if (data.diagnostics) {
-        setMailgunDiagnostics(data.diagnostics);
+        setZohoCpaasDiagnostics(data.diagnostics);
         showToast(data.diagnostics.summary);
       } else {
-        showToast(data.error || 'Failed to verify Mailgun connection');
+        showToast(data.error || 'Failed to verify Zoho CPaaS connection');
       }
     } catch (err: any) {
-      showToast(err.message || 'Failed to run Mailgun diagnostic test');
+      showToast(err.message || 'Failed to run Zoho CPaaS diagnostic check');
     } finally {
-      setVerifyingMailgun(false);
+      setVerifyingZohoCpaas(false);
     }
   };
 
-  const handleSendMailgunTest = async () => {
-    setSendingMailgunTest(true);
+  const handleSendZohoCpaasTest = async () => {
+    setSendingZohoCpaasTest(true);
     try {
-      const res = await fetch('/api/v1/notifications/mailgun-test', {
+      const res = await fetch('/api/v1/notifications/zoho-cpaas-test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          recipientEmail: mailgunConfig.testRecipient,
-          mailgunDomain: mailgunConfig.mailgunDomain,
-          smtpHost: mailgunConfig.smtpHost,
-          smtpPort: mailgunConfig.smtpPort,
-          smtpUser: mailgunConfig.smtpUser,
-          smtpPassword: mailgunConfig.smtpPassword,
-          mailgunApiKey: mailgunConfig.mailgunApiKey,
-          mailgunRegion: mailgunConfig.mailgunRegion,
-          smtpFrom: mailgunConfig.smtpFrom,
+          recipientEmail: zohoCpaasConfig.testRecipient,
+          zohoRegion: zohoCpaasConfig.zohoRegion,
+          sendMailToken: zohoCpaasConfig.sendMailToken,
+          fromEmail: zohoCpaasConfig.fromEmail,
+          fromName: zohoCpaasConfig.fromName,
+          replyToEmail: zohoCpaasConfig.replyToEmail,
+          smtpHost: zohoCpaasConfig.smtpHost,
+          smtpPort: zohoCpaasConfig.smtpPort,
+          smtpUser: zohoCpaasConfig.smtpUser,
+          smtpPassword: zohoCpaasConfig.smtpPassword,
         }),
       });
       const data = await res.json();
       if (data.diagnostics) {
-        setMailgunDiagnostics(data.diagnostics);
+        setZohoCpaasDiagnostics(data.diagnostics);
       }
       if (res.ok) {
         await fetchPlatformData();
         showToast(
           data.diagnostics?.summary ||
-            `Tested Mailgun dispatch (${mailgunConfig.smtpHost}:${mailgunConfig.smtpPort}) to ${mailgunConfig.testRecipient}`
+            `Tested Zoho CPaaS (${zohoCpaasConfig.zohoRegion}) dispatch to ${zohoCpaasConfig.testRecipient}`
         );
+      } else {
+        showToast(data.error || 'Failed to send Zoho CPaaS test email');
       }
     } finally {
-      setSendingMailgunTest(false);
+      setSendingZohoCpaasTest(false);
     }
   };
 
@@ -2938,6 +2958,8 @@ export default function App() {
                         publicKeyOrClientId: gw.publicKeyOrClientId || '',
                         secretOrSalt: gw.secretOrSalt || '',
                         webhookSecret: gw.webhookSecret || '',
+                        refreshToken: gw.refreshToken || '',
+                        zohoRegion: gw.zohoRegion || 'IN',
                         privateKeyId: gw.privateKeyId || '',
                         publicKeyId: gw.publicKeyId || gw.publicKeyOrClientId || '',
                         payglocalPublicKeyPem: gw.payglocalPublicKeyPem || '',
@@ -3225,6 +3247,62 @@ export default function App() {
                                     PayU Dashboard → Developer → API Keys
                                   </span>
                                   . You can leave <strong className="text-slate-200">PayU Webhook Secret</strong> blank (or enter your Merchant Salt), as PayU signs callbacks using your Merchant Salt.
+                                </div>
+                              </div>
+                            )}
+
+                            {isZoho && (
+                              <div className="bg-slate-950 border border-emerald-500/30 rounded-lg p-3.5 space-y-2.5 text-xs">
+                                <div className="flex items-center justify-between gap-2 flex-wrap">
+                                  <span className="font-semibold text-emerald-300">
+                                    Zoho Payments Hosted Payment Links API (OAuth 2.0)
+                                  </span>
+                                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300">
+                                    {draft.environment === 'PRODUCTION'
+                                      ? `payments.zoho.${(draft.zohoRegion || 'IN').toLowerCase() === 'com' ? 'com' : (draft.zohoRegion || 'IN').toLowerCase() === 'au' ? 'com.au' : (draft.zohoRegion || 'IN').toLowerCase()}/api/v1`
+                                      : `payments-sandbox.zoho.${(draft.zohoRegion || 'IN').toLowerCase() === 'com' ? 'com' : (draft.zohoRegion || 'IN').toLowerCase() === 'au' ? 'com.au' : (draft.zohoRegion || 'IN').toLowerCase()}/api/v1`}
+                                  </span>
+                                </div>
+
+                                <div className="bg-slate-900/90 border border-slate-800 rounded p-2.5 space-y-1.5 text-[11px]">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-slate-400">Zoho Callback Return URL:</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const url = `${window.location.origin}/api/v1/callbacks/zoho`;
+                                        navigator.clipboard.writeText(url);
+                                        showToast(`Copied Zoho Callback URL: ${url}`);
+                                      }}
+                                      className="font-mono text-emerald-400 hover:underline truncate"
+                                    >
+                                      {typeof window !== 'undefined'
+                                        ? `${window.location.origin}/api/v1/callbacks/zoho`
+                                        : 'https://checkout.xperiserv.in/api/v1/callbacks/zoho'}{' '}
+                                      (Copy)
+                                    </button>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-slate-400">Zoho Webhook URL:</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const url = `${window.location.origin}/api/v1/webhooks/zoho`;
+                                        navigator.clipboard.writeText(url);
+                                        showToast(`Copied Zoho Webhook URL: ${url}`);
+                                      }}
+                                      className="font-mono text-emerald-400 hover:underline truncate"
+                                    >
+                                      {typeof window !== 'undefined'
+                                        ? `${window.location.origin}/api/v1/webhooks/zoho`
+                                        : 'https://checkout.xperiserv.in/api/v1/webhooks/zoho'}{' '}
+                                      (Copy)
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <div className="text-[11px] text-slate-400 leading-relaxed">
+                                  Enter your <strong className="text-slate-200">Account ID</strong> from Zoho Payments Settings, plus your <strong className="text-slate-200">OAuth Client ID, Client Secret, and Refresh Token</strong> (<span className="font-mono text-emerald-300">ZohoPay.payments.CREATE,READ</span>).
                                 </div>
                               </div>
                             )}
@@ -3530,6 +3608,54 @@ export default function App() {
                                       className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
                                     />
                                   </div>
+                                  {isZoho && (
+                                    <>
+                                      <div>
+                                        <label className="text-slate-400 block mb-1 font-medium text-emerald-300">
+                                          Zoho Data Center Region *
+                                        </label>
+                                        <select
+                                          value={draft.zohoRegion || 'IN'}
+                                          onChange={(e) =>
+                                            setGatewayEdits((prev) => ({
+                                              ...prev,
+                                              [gw.code]: { ...draft, zohoRegion: e.target.value },
+                                            }))
+                                          }
+                                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
+                                        >
+                                          <option value="IN">IN — India (payments.zoho.in / accounts.zoho.in)</option>
+                                          <option value="COM">COM — US/Global (payments.zoho.com)</option>
+                                          <option value="EU">EU — Europe (payments.zoho.eu)</option>
+                                          <option value="AU">AU — Australia (payments.zoho.com.au)</option>
+                                          <option value="AE">AE — UAE (payments.zoho.ae)</option>
+                                          <option value="SG">SG — Singapore (payments.zoho.sg)</option>
+                                        </select>
+                                      </div>
+
+                                      <div>
+                                        <label className="text-slate-400 block mb-1 font-medium text-emerald-300">
+                                          Zoho OAuth Refresh Token (Required for Live API) *
+                                        </label>
+                                        <input
+                                          type={showGatewaySecret[gw.code] ? 'text' : 'password'}
+                                          value={draft.refreshToken || ''}
+                                          onChange={(e) =>
+                                            setGatewayEdits((prev) => ({
+                                              ...prev,
+                                              [gw.code]: { ...draft, refreshToken: e.target.value },
+                                            }))
+                                          }
+                                          placeholder={
+                                            gw.hasRefreshTokenConfigured
+                                              ? '1000.•••••••• (Saved — enter new token to replace)'
+                                              : '1000.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+                                          }
+                                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
+                                        />
+                                      </div>
+                                    </>
+                                  )}
                                 </>
                               )}
 
@@ -4147,46 +4273,54 @@ export default function App() {
                 </div>
               )}
 
-              {/* 13. EMAIL NOTIFICATIONS (MAILGUN SMTP) */}
+              {/* 9. TRANSACTIONAL EMAIL SETTINGS (ZOHO CPAAS) */}
               {activeSection === 'notifications' && (
                 <div className="space-y-6">
-                  {/* Mailgun SMTP & REST API Configuration + Live Connection Tester */}
+                  {/* Zoho CPaaS Transactional Email API & SMTP Relay Configuration + Live Tester */}
                   <form
-                    onSubmit={handleSaveMailgunConfig}
+                    onSubmit={handleSaveZohoCpaasConfig}
                     className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4 text-xs"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
                       <div>
                         <h2 className="text-base font-bold text-white flex items-center gap-2 flex-wrap">
-                          <span>Mailgun SMTP &amp; API Transactional Mailer</span>
+                          <span>Zoho CPaaS Transactional Email System</span>
                           <span
                             className={`px-2 py-0.5 text-[10px] font-mono rounded border ${
-                              mailgunDiagnostics
-                                ? mailgunDiagnostics.overallWorking
+                              zohoCpaasDiagnostics
+                                ? zohoCpaasDiagnostics.overallWorking
                                   ? 'bg-emerald-950 text-emerald-300 border-emerald-500/40'
                                   : 'bg-rose-950 text-rose-300 border-rose-500/40'
-                                : mailgunConfig.smtpPassword || mailgunConfig.mailgunApiKey
+                                : zohoCpaasConfig.sendMailToken || zohoCpaasConfig.smtpPassword
                                   ? 'bg-emerald-950 text-emerald-300 border-emerald-500/30'
                                   : 'bg-amber-950 text-amber-300 border-amber-500/30'
                             }`}
                           >
-                            {mailgunDiagnostics
-                              ? mailgunDiagnostics.overallWorking
+                            {zohoCpaasDiagnostics
+                              ? zohoCpaasDiagnostics.overallWorking
                                 ? 'LIVE VERIFIED: WORKING'
-                                : 'LIVE TEST: NOT WORKING'
-                              : mailgunConfig.smtpPassword || mailgunConfig.mailgunApiKey
-                                ? 'Credentials Set (Click Test Connection)'
-                                : 'SMTP Password / API Key Required'}
+                                : 'LIVE TEST: CHECK TOKEN / SENDER'
+                              : zohoCpaasConfig.sendMailToken || zohoCpaasConfig.smtpPassword
+                                ? 'Token Set (Click Test Connection)'
+                                : 'Zoho CPaaS Send Mail Token Required'}
                           </span>
                         </h2>
                         <p className="text-slate-400 mt-0.5">
-                          Live SMTP Handshake (DNS → TCP → STARTTLS → AUTH LOGIN) &amp; Mailgun REST API v3 Verification (
+                          Live Zoho CPaaS REST API (
                           <span className="font-mono text-emerald-400">
-                            {mailgunConfig.smtpHost}:{mailgunConfig.smtpPort}
-                          </span>{' '}
-                          · Domain:{' '}
+                            cpaas.zoho.
+                            {zohoCpaasConfig.zohoRegion === 'COM'
+                              ? 'com'
+                              : zohoCpaasConfig.zohoRegion === 'AU'
+                                ? 'com.au'
+                                : zohoCpaasConfig.zohoRegion === 'CA'
+                                  ? 'zohocloud.ca'
+                                  : zohoCpaasConfig.zohoRegion.toLowerCase()}
+                            /v1.1/email
+                          </span>
+                          ) &amp; ZeptoMail/CPaaS SMTP Relay (
                           <span className="font-mono text-slate-200">
-                            {mailgunConfig.mailgunDomain}
+                            {zohoCpaasConfig.smtpHost}:{zohoCpaasConfig.smtpPort}
                           </span>
                           )
                         </p>
@@ -4194,227 +4328,261 @@ export default function App() {
                       <div className="flex flex-wrap items-center gap-2">
                         <input
                           type="email"
-                          value={mailgunConfig.testRecipient}
+                          value={zohoCpaasConfig.testRecipient}
                           onChange={(e) =>
-                            setMailgunConfig({ ...mailgunConfig, testRecipient: e.target.value })
+                            setZohoCpaasConfig({ ...zohoCpaasConfig, testRecipient: e.target.value })
                           }
-                          placeholder="Recipient email for Mailgun test"
+                          placeholder="Recipient email for Zoho CPaaS test"
                           className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 w-52"
                         />
                         <button
                           type="submit"
-                          disabled={savingMailgunConfig}
+                          disabled={savingZohoCpaasConfig}
                           className="px-3.5 py-2 font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg whitespace-nowrap"
                         >
-                          {savingMailgunConfig ? 'Saving...' : 'Save Credentials'}
+                          {savingZohoCpaasConfig ? 'Saving...' : 'Save Zoho CPaaS Config'}
                         </button>
                         <button
                           type="button"
-                          disabled={verifyingMailgun}
-                          onClick={handleVerifyMailgunConnection}
+                          disabled={verifyingZohoCpaas}
+                          onClick={handleVerifyZohoCpaasConnection}
                           className="px-3.5 py-2 font-semibold bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/40 rounded-lg whitespace-nowrap flex items-center gap-1.5"
                         >
                           <Play className="w-3.5 h-3.5" />
-                          {verifyingMailgun
-                            ? 'Testing Handshake...'
-                            : 'Test SMTP / API Connection'}
+                          {verifyingZohoCpaas
+                            ? 'Probing Zoho CPaaS...'
+                            : 'Test Zoho CPaaS Connection'}
                         </button>
                         <button
                           type="button"
-                          disabled={sendingMailgunTest}
-                          onClick={handleSendMailgunTest}
+                          disabled={sendingZohoCpaasTest}
+                          onClick={handleSendZohoCpaasTest}
                           className="px-4 py-2 font-semibold bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg whitespace-nowrap"
                         >
-                          {sendingMailgunTest ? 'Sending Live Email...' : 'Send Live Test Email'}
+                          {sendingZohoCpaasTest ? 'Sending via Zoho CPaaS...' : 'Send Live Test Email'}
                         </button>
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                       <div>
-                        <label className="block text-slate-400 mb-1">Mailgun SMTP Host</label>
-                        <input
-                          type="text"
-                          value={mailgunConfig.smtpHost}
-                          onChange={(e) =>
-                            setMailgunConfig({ ...mailgunConfig, smtpHost: e.target.value })
-                          }
-                          placeholder="smtp.mailgun.org"
+                        <label className="block text-slate-400 mb-1">Zoho CPaaS Data Center</label>
+                        <select
+                          value={zohoCpaasConfig.zohoRegion}
+                          onChange={(e) => {
+                            const nextRegion = e.target.value as any;
+                            const smtpMap: Record<string, string> = {
+                              IN: 'smtp.zeptomail.in',
+                              COM: 'smtp.zeptomail.com',
+                              EU: 'smtp.zeptomail.eu',
+                              AU: 'smtp.zeptomail.com.au',
+                              CA: 'smtp.zeptomail.ca',
+                              JP: 'smtp.zeptomail.jp',
+                              AE: 'smtp.zeptomail.ae',
+                              SG: 'smtp.zeptomail.sg',
+                              UK: 'smtp.zeptomail.uk',
+                              SA: 'smtp.zeptomail.sa',
+                            };
+                            setZohoCpaasConfig({
+                              ...zohoCpaasConfig,
+                              zohoRegion: nextRegion,
+                              smtpHost: smtpMap[nextRegion] || 'smtp.zeptomail.in',
+                            });
+                          }}
                           className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
-                        />
+                        >
+                          <option value="IN">IN — India (cpaas.zoho.in)</option>
+                          <option value="COM">COM — US/Global (cpaas.zoho.com)</option>
+                          <option value="EU">EU — Europe (cpaas.zoho.eu)</option>
+                          <option value="AU">AU — Australia (cpaas.zoho.com.au)</option>
+                          <option value="CA">CA — Canada (cpaas.zohocloud.ca)</option>
+                          <option value="JP">JP — Japan (cpaas.zoho.jp)</option>
+                          <option value="AE">AE — UAE (cpaas.zoho.ae)</option>
+                          <option value="SG">SG — Singapore (cpaas.zoho.sg)</option>
+                          <option value="UK">UK — United Kingdom (cpaas.zoho.uk)</option>
+                          <option value="SA">SA — Saudi Arabia (cpaas.zoho.sa)</option>
+                        </select>
                       </div>
-                      <div>
-                        <label className="block text-slate-400 mb-1">SMTP Port (587 / 465 / 2525)</label>
-                        <input
-                          type="text"
-                          value={mailgunConfig.smtpPort}
-                          onChange={(e) =>
-                            setMailgunConfig({ ...mailgunConfig, smtpPort: e.target.value })
-                          }
-                          placeholder="587"
-                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-slate-400 mb-1">Mailgun Domain</label>
-                        <input
-                          type="text"
-                          value={mailgunConfig.mailgunDomain}
-                          onChange={(e) =>
-                            setMailgunConfig({ ...mailgunConfig, mailgunDomain: e.target.value })
-                          }
-                          placeholder="mg.xperiserv.in"
-                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-slate-400 mb-1">
-                          Mailgun SMTP Login (Username)
-                        </label>
-                        <input
-                          type="text"
-                          value={mailgunConfig.smtpUser}
-                          onChange={(e) =>
-                            setMailgunConfig({ ...mailgunConfig, smtpUser: e.target.value })
-                          }
-                          placeholder="postmaster@mg.xperiserv.in"
-                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
-                        />
-                      </div>
-                      <div>
+
+                      <div className="sm:col-span-2">
                         <div className="flex items-center justify-between mb-1">
                           <label className="text-slate-300 font-medium">
-                            Mailgun SMTP Password *
+                            Zoho CPaaS Send Mail Token (Zoho-enczapikey) *
                           </label>
                           <button
                             type="button"
-                            onClick={() => setShowMailgunPassword((v) => !v)}
+                            onClick={() => setShowZohoCpaasToken((v) => !v)}
                             className="text-[11px] font-mono text-emerald-400 hover:underline"
                           >
-                            {showMailgunPassword ? 'Hide' : 'Show'}
+                            {showZohoCpaasToken ? 'Hide' : 'Show'}
                           </button>
                         </div>
                         <input
-                          type={showMailgunPassword ? 'text' : 'password'}
-                          value={mailgunConfig.smtpPassword}
+                          type={showZohoCpaasToken ? 'text' : 'password'}
+                          value={zohoCpaasConfig.sendMailToken}
                           onChange={(e) =>
-                            setMailgunConfig({ ...mailgunConfig, smtpPassword: e.target.value })
+                            setZohoCpaasConfig({ ...zohoCpaasConfig, sendMailToken: e.target.value })
                           }
-                          placeholder="Enter Mailgun SMTP password..."
+                          placeholder="PHtE6r0I... (Paste Send Mail Token from Zoho CPaaS → Mail Agents → Setup Info)"
                           className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:border-emerald-500 focus:outline-none"
                         />
                       </div>
+
                       <div>
                         <label className="block text-slate-400 mb-1">
-                          Mailgun Private API Key (Optional REST API)
+                          Verified From Email *
                         </label>
                         <input
-                          type={showMailgunPassword ? 'text' : 'password'}
-                          value={mailgunConfig.mailgunApiKey}
+                          type="email"
+                          value={zohoCpaasConfig.fromEmail}
                           onChange={(e) =>
-                            setMailgunConfig({ ...mailgunConfig, mailgunApiKey: e.target.value })
+                            setZohoCpaasConfig({ ...zohoCpaasConfig, fromEmail: e.target.value })
                           }
-                          placeholder="key-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:border-emerald-500 focus:outline-none"
+                          placeholder="checkout@xperiserv.in"
+                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
                         />
                       </div>
                       <div>
-                        <label className="block text-slate-400 mb-1">Mailgun API Region</label>
-                        <select
-                          value={mailgunConfig.mailgunRegion}
+                        <label className="block text-slate-400 mb-1">Sender Display Name</label>
+                        <input
+                          type="text"
+                          value={zohoCpaasConfig.fromName}
                           onChange={(e) =>
-                            setMailgunConfig({
-                              ...mailgunConfig,
-                              mailgunRegion: e.target.value as 'US' | 'EU',
-                            })
+                            setZohoCpaasConfig({ ...zohoCpaasConfig, fromName: e.target.value })
                           }
-                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
-                        >
-                          <option value="US">US (api.mailgun.net)</option>
-                          <option value="EU">EU (api.eu.mailgun.net)</option>
-                        </select>
+                          placeholder="Allientic Checkout"
+                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-100"
+                        />
                       </div>
                       <div>
+                        <label className="block text-slate-400 mb-1">Reply-To Address</label>
+                        <input
+                          type="email"
+                          value={zohoCpaasConfig.replyToEmail}
+                          onChange={(e) =>
+                            setZohoCpaasConfig({ ...zohoCpaasConfig, replyToEmail: e.target.value })
+                          }
+                          placeholder="support@xperiserv.in"
+                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
+                        />
+                      </div>
+
+                      <div>
                         <label className="block text-slate-400 mb-1">
-                          Sender From Address (SMTP_FROM)
+                          Zoho SMTP Relay Host (Optional Fallback)
                         </label>
                         <input
                           type="text"
-                          value={mailgunConfig.smtpFrom}
+                          value={zohoCpaasConfig.smtpHost}
                           onChange={(e) =>
-                            setMailgunConfig({ ...mailgunConfig, smtpFrom: e.target.value })
+                            setZohoCpaasConfig({ ...zohoCpaasConfig, smtpHost: e.target.value })
                           }
-                          placeholder="Allientic Checkout <checkout@mg.xperiserv.in>"
+                          placeholder="smtp.zeptomail.in"
+                          className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-400 mb-1">
+                          SMTP Port &amp; Username
+                        </label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <input
+                            type="text"
+                            value={zohoCpaasConfig.smtpPort}
+                            onChange={(e) =>
+                              setZohoCpaasConfig({ ...zohoCpaasConfig, smtpPort: e.target.value })
+                            }
+                            placeholder="587"
+                            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 font-mono text-slate-100"
+                          />
+                          <input
+                            type="text"
+                            value={zohoCpaasConfig.smtpUser}
+                            onChange={(e) =>
+                              setZohoCpaasConfig({ ...zohoCpaasConfig, smtpUser: e.target.value })
+                            }
+                            placeholder="emailapikey"
+                            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 font-mono text-slate-100"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-slate-400 mb-1">
+                          Zoho SMTP Password (Optional)
+                        </label>
+                        <input
+                          type={showZohoCpaasToken ? 'text' : 'password'}
+                          value={zohoCpaasConfig.smtpPassword}
+                          onChange={(e) =>
+                            setZohoCpaasConfig({ ...zohoCpaasConfig, smtpPassword: e.target.value })
+                          }
+                          placeholder="Optional ZeptoMail SMTP password..."
                           className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100"
                         />
                       </div>
                     </div>
 
-                    {/* Live Step-by-Step SMTP & API Diagnostic Report */}
-                    {mailgunDiagnostics && (
+                    {/* Live Step-by-Step Zoho CPaaS Diagnostic Report */}
+                    {zohoCpaasDiagnostics && (
                       <div
                         className={`mt-4 rounded-xl border p-4 space-y-3 ${
-                          mailgunDiagnostics.overallWorking
+                          zohoCpaasDiagnostics.overallWorking
                             ? 'bg-emerald-950/20 border-emerald-500/40'
                             : 'bg-rose-950/25 border-rose-500/40'
                         }`}
                       >
                         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
                           <div className="flex items-center gap-2">
-                            {mailgunDiagnostics.overallWorking ? (
+                            {zohoCpaasDiagnostics.overallWorking ? (
                               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                             ) : (
                               <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
                             )}
                             <span
                               className={`font-bold text-xs ${
-                                mailgunDiagnostics.overallWorking
+                                zohoCpaasDiagnostics.overallWorking
                                   ? 'text-emerald-300'
                                   : 'text-rose-300'
                               }`}
                             >
-                              {mailgunDiagnostics.summary}
+                              {zohoCpaasDiagnostics.summary}
                             </span>
                           </div>
                           <div className="flex items-center gap-3 text-[11px] font-mono text-slate-400">
                             <span>
-                              SMTP Auth:{' '}
+                              Zoho CPaaS API:{' '}
                               <strong
                                 className={
-                                  mailgunDiagnostics.smtpWorking
+                                  zohoCpaasDiagnostics.apiWorking
                                     ? 'text-emerald-400'
                                     : 'text-rose-400'
                                 }
                               >
-                                {mailgunDiagnostics.smtpWorking ? 'WORKING (235 OK)' : 'FAILED'}
+                                {zohoCpaasDiagnostics.apiWorking ? 'WORKING' : 'NOT VERIFIED'}
                               </strong>
                             </span>
                             <span>·</span>
                             <span>
-                              REST API:{' '}
+                              SMTP Relay:{' '}
                               <strong
                                 className={
-                                  mailgunDiagnostics.apiWorking
+                                  zohoCpaasDiagnostics.smtpWorking
                                     ? 'text-emerald-400'
                                     : 'text-slate-400'
                                 }
                               >
-                                {mailgunDiagnostics.apiWorking
-                                  ? 'WORKING (200 OK)'
-                                  : mailgunConfig.mailgunApiKey
-                                    ? 'FAILED'
-                                    : 'NOT USED'}
+                                {zohoCpaasDiagnostics.smtpWorking ? 'WORKING (235 OK)' : 'OPTIONAL'}
                               </strong>
                             </span>
                             <span>·</span>
                             <span>
-                              Tested: {new Date(mailgunDiagnostics.testedAt).toLocaleTimeString()}
+                              Tested: {new Date(zohoCpaasDiagnostics.testedAt).toLocaleTimeString()}
                             </span>
                           </div>
                         </div>
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                          {mailgunDiagnostics.steps.map((st, idx) => (
+                          {zohoCpaasDiagnostics.steps.map((st, idx) => (
                             <div
                               key={idx}
                               className="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-1"
@@ -4457,7 +4625,7 @@ export default function App() {
                         <thead>
                           <tr className="border-b border-slate-800 bg-slate-950/50 text-slate-400">
                             <th className="py-3 px-4">Event</th>
-                            <th className="py-3 px-4">Recipient &amp; Mailgun Host</th>
+                            <th className="py-3 px-4">Recipient &amp; Zoho CPaaS Host</th>
                             <th className="py-3 px-4">Delivery Status</th>
                             <th className="py-3 px-4">Subject</th>
                             <th className="py-3 px-4 text-right">Template</th>
@@ -4470,7 +4638,7 @@ export default function App() {
                               <td className="py-3 px-4">
                                 <div className="text-slate-200">{n.recipientEmail}</div>
                                 <div className="text-[11px] font-mono text-slate-500">
-                                  {n.smtpHost || 'smtp.mailgun.org'}
+                                  {n.smtpHost || 'cpaas.zoho.in'}
                                 </div>
                               </td>
                               <td className="py-3 px-4">
@@ -4505,7 +4673,7 @@ export default function App() {
 
                     <div className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3 text-xs">
                       <h3 className="text-sm font-bold text-white">
-                        Allientic Mailgun HTML Email Template Preview
+                        Allientic Zoho CPaaS HTML Email Preview
                       </h3>
                       {selectedEmailPreview || notificationsList[0] ? (
                         <div

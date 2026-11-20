@@ -29,20 +29,30 @@ import {
   getPlatformSnapshot,
   handlePayGlocalCallback,
   handlePayUCallback,
+  handleZohoCallback,
   initiateRefund,
   processCheckoutPayment,
   purgeAllTestData,
   resolvePayGlocalCredentials,
   resolvePayUCredentials,
+  resolveZohoCredentials,
   sanitizeLegacyMerchantTaxConfig,
 } from './src/db/repository.ts';
 import {
   PayGlocalAdapter,
   normalizePemString,
 } from './src/services/gateways/payglocal.adapter.ts';
+import {
+  ZohoPaymentsAdapter,
+  normalizeZohoRegion,
+} from './src/services/gateways/zoho.adapter.ts';
 import { optionalAuth, AuthRequest } from './src/middleware/auth.ts';
 import { WebhookService } from './src/services/webhook.service.ts';
-import { NotificationService } from './src/services/notification.service.ts';
+import {
+  NotificationService,
+  getZohoCpaasEndpoints,
+  normalizeZohoCpaasRegion,
+} from './src/services/notification.service.ts';
 import {
   XPERISERV_POLICIES,
   XPERISERV_POLICY_VERSION,
@@ -59,7 +69,14 @@ const orderTrackingOtpMap = new Map<
 const app = express();
 const PORT = 3000;
 
-app.use(express.json({ limit: '2mb' }));
+app.use(
+  express.json({
+    limit: '2mb',
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf.toString('utf8');
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true }));
 
 function getRequestBaseUrl(req: express.Request): string {
@@ -1650,26 +1667,27 @@ app.post('/api/v1/pay/:token/checkout', async (req, res) => {
   }
 });
 
-// Save Mailgun SMTP & REST API Configuration to PostgreSQL
-app.post('/api/v1/notifications/mailgun-config', optionalAuth, async (req: AuthRequest, res) => {
+// Save Zoho CPaaS Transactional Email & Optional Zoho SMTP Relay Configuration to PostgreSQL
+app.post('/api/v1/notifications/zoho-cpaas-config', optionalAuth, async (req: AuthRequest, res) => {
   try {
     await ensureSeeded();
     const {
+      zohoRegion,
+      sendMailToken,
+      fromEmail,
+      fromName,
+      replyToEmail,
       smtpHost,
       smtpPort,
-      mailgunDomain,
       smtpUser,
       smtpPassword,
-      mailgunApiKey,
-      mailgunRegion,
-      smtpFrom,
       testRecipient,
     } = req.body;
 
     const existingRows = await db
       .select()
       .from(systemSettings)
-      .where(eq(systemSettings.settingKey, 'mailgun_smtp_config'));
+      .where(eq(systemSettings.settingKey, 'zoho_cpaas_mail_config'));
 
     let prevConfig: any = {};
     if (existingRows[0]) {
@@ -1680,25 +1698,33 @@ app.post('/api/v1/notifications/mailgun-config', optionalAuth, async (req: AuthR
       }
     }
 
+    const region = normalizeZohoCpaasRegion(zohoRegion || prevConfig.zohoRegion || 'IN');
+    const ep = getZohoCpaasEndpoints(region);
+
+    const nextSendMailToken =
+      sendMailToken !== undefined
+        ? String(sendMailToken).replace(/^Zoho-enczapikey\s+/i, '').trim()
+        : prevConfig.sendMailToken || process.env.ZOHO_CPAAS_SEND_MAIL_TOKEN || '';
+
     const updatedConfig = {
-      smtpHost: (smtpHost || prevConfig.smtpHost || 'smtp.mailgun.org').trim(),
+      zohoRegion: region,
+      sendMailToken: nextSendMailToken,
+      fromEmail: (fromEmail || prevConfig.fromEmail || 'checkout@xperiserv.in').trim(),
+      fromName: (fromName || prevConfig.fromName || 'Allientic Checkout').trim(),
+      replyToEmail: (
+        replyToEmail ||
+        prevConfig.replyToEmail ||
+        fromEmail ||
+        prevConfig.fromEmail ||
+        'support@xperiserv.in'
+      ).trim(),
+      smtpHost: (smtpHost || ep.smtpHost).trim(),
       smtpPort: (smtpPort || prevConfig.smtpPort || '587').toString().trim(),
-      mailgunDomain: (mailgunDomain || prevConfig.mailgunDomain || 'mg.xperiserv.in').trim(),
-      smtpUser: (smtpUser || prevConfig.smtpUser || 'postmaster@mg.xperiserv.in').trim(),
+      smtpUser: (smtpUser || prevConfig.smtpUser || 'emailapikey').trim(),
       smtpPassword:
         smtpPassword !== undefined
-          ? smtpPassword
-          : prevConfig.smtpPassword || process.env.SMTP_PASSWORD || '',
-      mailgunApiKey:
-        mailgunApiKey !== undefined
-          ? mailgunApiKey
-          : prevConfig.mailgunApiKey || process.env.MAILGUN_API_KEY || '',
-      mailgunRegion: mailgunRegion === 'EU' ? 'EU' : prevConfig.mailgunRegion || 'US',
-      smtpFrom: (
-        smtpFrom ||
-        prevConfig.smtpFrom ||
-        'Allientic Checkout <checkout@mg.xperiserv.in>'
-      ).trim(),
+          ? String(smtpPassword)
+          : prevConfig.smtpPassword || process.env.ZOHO_CPAAS_SMTP_PASSWORD || '',
       testRecipient: (testRecipient || prevConfig.testRecipient || 'admin@xperiserv.in').trim(),
       updatedAt: new Date().toISOString(),
     };
@@ -1713,7 +1739,7 @@ app.post('/api/v1/notifications/mailgun-config', optionalAuth, async (req: AuthR
         .where(eq(systemSettings.id, existingRows[0].id));
     } else {
       await db.insert(systemSettings).values({
-        settingKey: 'mailgun_smtp_config',
+        settingKey: 'zoho_cpaas_mail_config',
         settingValueJson: JSON.stringify(updatedConfig),
       });
     }
@@ -1721,61 +1747,55 @@ app.post('/api/v1/notifications/mailgun-config', optionalAuth, async (req: AuthR
     await db.insert(auditLogs).values({
       actorEmail: req.dbUser?.email || 'admin@xperiserv.in',
       actorRole: 'Super Administrator',
-      action: 'mailgun.config_updated',
+      action: 'zoho_cpaas.config_updated',
       resourceType: 'SystemSetting',
-      resourceId: 'mailgun_smtp_config',
+      resourceId: 'zoho_cpaas_mail_config',
       detailsJson: JSON.stringify({
+        zohoRegion: updatedConfig.zohoRegion,
+        restHost: ep.restHost,
+        fromEmail: updatedConfig.fromEmail,
         smtpHost: updatedConfig.smtpHost,
         smtpPort: updatedConfig.smtpPort,
-        mailgunDomain: updatedConfig.mailgunDomain,
-        smtpUser: updatedConfig.smtpUser,
-        hasPassword: Boolean(updatedConfig.smtpPassword),
-        hasApiKey: Boolean(updatedConfig.mailgunApiKey),
+        hasSendMailToken: Boolean(updatedConfig.sendMailToken),
+        hasSmtpPassword: Boolean(updatedConfig.smtpPassword),
       }),
       ipAddress: req.ip || '127.0.0.1',
     });
 
     res.json({
       saved: true,
-      mailgunConfig: {
+      zohoCpaasConfig: {
         ...updatedConfig,
-        hasPasswordConfigured: Boolean(updatedConfig.smtpPassword || updatedConfig.mailgunApiKey),
+        hasTokenConfigured: Boolean(updatedConfig.sendMailToken || updatedConfig.smtpPassword),
       },
     });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Failed to save Mailgun configuration' });
+    res.status(500).json({ error: error.message || 'Failed to save Zoho CPaaS mail configuration' });
   }
 });
 
-// Live Mailgun SMTP & REST API Connection Diagnostics (Verifies if SMTP/API is working)
-app.post('/api/v1/notifications/mailgun-verify', optionalAuth, async (req: AuthRequest, res) => {
+// Live Zoho CPaaS Email API & SMTP Diagnostics
+app.post('/api/v1/notifications/zoho-cpaas-verify', optionalAuth, async (req: AuthRequest, res) => {
   try {
     await ensureSeeded();
-    const saved = await NotificationService.getSavedMailgunConfig();
-    const {
-      smtpHost,
-      smtpPort,
-      mailgunDomain,
-      smtpUser,
-      smtpPassword,
-      mailgunApiKey,
-      mailgunRegion,
-      smtpFrom,
-    } = req.body;
+    const saved = await NotificationService.getSavedZohoCpaasConfig();
+    const region = normalizeZohoCpaasRegion(req.body.zohoRegion || saved.zohoRegion || 'IN');
+    const ep = getZohoCpaasEndpoints(region);
 
     const testConfig = {
-      smtpHost: (smtpHost || saved.smtpHost || 'smtp.mailgun.org').trim(),
-      smtpPort: Number(smtpPort || saved.smtpPort || 587),
-      mailgunDomain: (mailgunDomain || saved.mailgunDomain || 'mg.xperiserv.in').trim(),
-      smtpUser: (smtpUser || saved.smtpUser || 'postmaster@mg.xperiserv.in').trim(),
-      smtpPassword: smtpPassword !== undefined ? smtpPassword : saved.smtpPassword,
-      mailgunApiKey: mailgunApiKey !== undefined ? mailgunApiKey : saved.mailgunApiKey,
-      mailgunRegion: (mailgunRegion === 'EU' ? 'EU' : saved.mailgunRegion || 'US') as 'US' | 'EU',
-      smtpFrom: (
-        smtpFrom ||
-        saved.smtpFrom ||
-        'Allientic Checkout <checkout@mg.xperiserv.in>'
-      ).trim(),
+      zohoRegion: region,
+      sendMailToken:
+        req.body.sendMailToken !== undefined
+          ? String(req.body.sendMailToken).replace(/^Zoho-enczapikey\s+/i, '').trim()
+          : saved.sendMailToken,
+      fromEmail: (req.body.fromEmail || saved.fromEmail || 'checkout@xperiserv.in').trim(),
+      fromName: (req.body.fromName || saved.fromName || 'Allientic Checkout').trim(),
+      replyToEmail: (req.body.replyToEmail || saved.replyToEmail || 'support@xperiserv.in').trim(),
+      smtpHost: (req.body.smtpHost || ep.smtpHost).trim(),
+      smtpPort: Number(req.body.smtpPort || saved.smtpPort || 587),
+      smtpUser: (req.body.smtpUser || saved.smtpUser || 'emailapikey').trim(),
+      smtpPassword:
+        req.body.smtpPassword !== undefined ? String(req.body.smtpPassword) : saved.smtpPassword,
     };
 
     const diagnostics = await NotificationService.runLiveDiagnostics({
@@ -1784,30 +1804,31 @@ app.post('/api/v1/notifications/mailgun-verify', optionalAuth, async (req: AuthR
 
     res.json({ diagnostics });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Mailgun verification check failed' });
+    res.status(500).json({ error: error.message || 'Zoho CPaaS verification check failed' });
   }
 });
 
-// Mailgun SMTP & API Live Email Test Dispatch Endpoint
-app.post('/api/v1/notifications/mailgun-test', optionalAuth, async (req: AuthRequest, res) => {
+// Zoho CPaaS Live Test Email Dispatch Endpoint
+app.post('/api/v1/notifications/zoho-cpaas-test', optionalAuth, async (req: AuthRequest, res) => {
   try {
     await ensureSeeded();
     const {
       recipientEmail,
-      mailgunDomain,
+      zohoRegion,
+      sendMailToken,
+      fromEmail,
+      fromName,
+      replyToEmail,
       smtpHost,
       smtpPort,
       smtpUser,
       smtpPassword,
-      mailgunApiKey,
-      mailgunRegion,
-      smtpFrom,
     } = req.body;
 
     const existingRows = await db
       .select()
       .from(systemSettings)
-      .where(eq(systemSettings.settingKey, 'mailgun_smtp_config'));
+      .where(eq(systemSettings.settingKey, 'zoho_cpaas_mail_config'));
     let prevConfig: any = {};
     if (existingRows[0]) {
       try {
@@ -1817,26 +1838,27 @@ app.post('/api/v1/notifications/mailgun-test', optionalAuth, async (req: AuthReq
       }
     }
 
+    const region = normalizeZohoCpaasRegion(zohoRegion || prevConfig.zohoRegion || 'IN');
+    const ep = getZohoCpaasEndpoints(region);
+
     const nextCfg = {
-      smtpHost: (smtpHost || prevConfig.smtpHost || 'smtp.mailgun.org').trim(),
+      zohoRegion: region,
+      sendMailToken:
+        sendMailToken !== undefined && String(sendMailToken).trim() !== ''
+          ? String(sendMailToken).replace(/^Zoho-enczapikey\s+/i, '').trim()
+          : prevConfig.sendMailToken || process.env.ZOHO_CPAAS_SEND_MAIL_TOKEN || '',
+      fromEmail: (fromEmail || prevConfig.fromEmail || 'checkout@xperiserv.in').trim(),
+      fromName: (fromName || prevConfig.fromName || 'Allientic Checkout').trim(),
+      replyToEmail: (replyToEmail || prevConfig.replyToEmail || 'support@xperiserv.in').trim(),
+      smtpHost: (smtpHost || ep.smtpHost).trim(),
       smtpPort: (smtpPort || prevConfig.smtpPort || '587').toString().trim(),
-      mailgunDomain: (mailgunDomain || prevConfig.mailgunDomain || 'mg.xperiserv.in').trim(),
-      smtpUser: (smtpUser || prevConfig.smtpUser || 'postmaster@mg.xperiserv.in').trim(),
+      smtpUser: (smtpUser || prevConfig.smtpUser || 'emailapikey').trim(),
       smtpPassword:
         smtpPassword !== undefined && smtpPassword !== ''
-          ? smtpPassword
-          : prevConfig.smtpPassword || process.env.SMTP_PASSWORD || '',
-      mailgunApiKey:
-        mailgunApiKey !== undefined && mailgunApiKey !== ''
-          ? mailgunApiKey
-          : prevConfig.mailgunApiKey || process.env.MAILGUN_API_KEY || '',
-      mailgunRegion: mailgunRegion === 'EU' ? 'EU' : prevConfig.mailgunRegion || 'US',
-      smtpFrom: (
-        smtpFrom ||
-        prevConfig.smtpFrom ||
-        'Allientic Checkout <checkout@mg.xperiserv.in>'
-      ).trim(),
+          ? String(smtpPassword)
+          : prevConfig.smtpPassword || process.env.ZOHO_CPAAS_SMTP_PASSWORD || '',
       testRecipient: (recipientEmail || prevConfig.testRecipient || 'admin@xperiserv.in').trim(),
+      updatedAt: new Date().toISOString(),
     };
 
     if (existingRows[0]) {
@@ -1846,7 +1868,7 @@ app.post('/api/v1/notifications/mailgun-test', optionalAuth, async (req: AuthReq
         .where(eq(systemSettings.id, existingRows[0].id));
     } else {
       await db.insert(systemSettings).values({
-        settingKey: 'mailgun_smtp_config',
+        settingKey: 'zoho_cpaas_mail_config',
         settingValueJson: JSON.stringify(nextCfg),
       });
     }
@@ -1855,24 +1877,25 @@ app.post('/api/v1/notifications/mailgun-test', optionalAuth, async (req: AuthReq
     const { subject, html } = NotificationService.buildBrandedHtml({
       eventType: 'payment.success',
       recipientEmail: targetEmail,
-      customerName: 'Allientic Admin (Mailgun Live Verification)',
-      orderNumber: `MG-VERIFY-${new Date().getFullYear()}`,
+      customerName: 'Allientic Admin (Zoho CPaaS Verification)',
+      orderNumber: `ZCPAAS-VERIFY-${new Date().getFullYear()}`,
       amountFormatted: '₹1.00',
-      transactionId: `MG-SMTP-${Date.now().toString(36).toUpperCase()}`,
-      gatewayName: 'PayU India / Zoho Payments',
-      extraNote: `Dispatched via Mailgun (${nextCfg.smtpHost}:${nextCfg.smtpPort} · Domain: ${nextCfg.mailgunDomain}).`,
+      transactionId: `ZCPAAS-${Date.now().toString(36).toUpperCase()}`,
+      gatewayName: 'PayU India / Zoho Payments / PayGlocal',
+      extraNote: `Dispatched via Zoho CPaaS (${ep.restHost} · Region ${region} · From ${nextCfg.fromEmail}).`,
     });
 
     const diagnostics = await NotificationService.runLiveDiagnostics({
       config: {
+        zohoRegion: nextCfg.zohoRegion,
+        sendMailToken: nextCfg.sendMailToken,
+        fromEmail: nextCfg.fromEmail,
+        fromName: nextCfg.fromName,
+        replyToEmail: nextCfg.replyToEmail,
         smtpHost: nextCfg.smtpHost,
         smtpPort: Number(nextCfg.smtpPort || 587),
-        mailgunDomain: nextCfg.mailgunDomain,
         smtpUser: nextCfg.smtpUser,
         smtpPassword: nextCfg.smtpPassword,
-        mailgunApiKey: nextCfg.mailgunApiKey,
-        mailgunRegion: nextCfg.mailgunRegion as 'US' | 'EU',
-        smtpFrom: nextCfg.smtpFrom,
       },
       sendTestEmailTo: targetEmail,
       subject,
@@ -1880,28 +1903,28 @@ app.post('/api/v1/notifications/mailgun-test', optionalAuth, async (req: AuthReq
     });
 
     const statusLabel = diagnostics.emailDispatched
-      ? diagnostics.smtpWorking
-        ? 'Delivered (Live Mailgun SMTP 250 OK)'
-        : 'Delivered (Live Mailgun REST API 200 OK)'
+      ? diagnostics.apiWorking
+        ? 'Delivered (Live Zoho CPaaS REST API)'
+        : 'Delivered (Live Zoho CPaaS SMTP 250 OK)'
       : diagnostics.overallWorking
-        ? 'Verified (Mailgun Connected)'
-        : 'Failed (Mailgun Auth / Connection Error)';
+        ? 'Verified (Zoho CPaaS Connected)'
+        : 'Failed (Zoho CPaaS Auth / Connection Error)';
 
     const logged = await NotificationService.sendAndLog({
       eventType: 'payment.success',
       recipientEmail: targetEmail,
-      customerName: 'Allientic Admin (Mailgun Live Verification)',
-      orderNumber: `MG-VERIFY-${new Date().getFullYear()}`,
+      customerName: 'Allientic Admin (Zoho CPaaS Verification)',
+      orderNumber: `ZCPAAS-VERIFY-${new Date().getFullYear()}`,
       amountFormatted: '₹1.00',
-      transactionId: `MG-SMTP-${Date.now().toString(36).toUpperCase()}`,
-      gatewayName: 'PayU India / Zoho Payments',
+      transactionId: `ZCPAAS-${Date.now().toString(36).toUpperCase()}`,
+      gatewayName: 'PayU India / Zoho Payments / PayGlocal',
       extraNote: diagnostics.summary,
       precomputedStatus: statusLabel,
     });
 
     res.json({ notification: logged, diagnostics });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Mailgun SMTP test failed' });
+    res.status(500).json({ error: error.message || 'Zoho CPaaS email test failed' });
   }
 });
 
@@ -2011,6 +2034,42 @@ const payglocalCallbackHandler = async (req: express.Request, res: express.Respo
 app.post('/api/v1/callbacks/payglocal', payglocalCallbackHandler);
 app.get('/api/v1/callbacks/payglocal', payglocalCallbackHandler);
 app.post('/api/v1/webhooks/payglocal', payglocalCallbackHandler);
+
+// Official Zoho Payments Callback & Webhook Handler (X-Zoho-Webhook-Signature & API status poll)
+const zohoCallbackHandler = async (req: express.Request, res: express.Response) => {
+  try {
+    const payload = { ...(req.query || {}), ...(req.body || {}) };
+    const rawBody = (req as any).rawBody as string | undefined;
+    const result = await handleZohoCallback(payload, rawBody, req.headers as Record<string, any>);
+    const wantsJson =
+      req.path.includes('/webhooks/') ||
+      (req.headers.accept &&
+        req.headers.accept.includes('application/json') &&
+        !req.headers.accept.includes('text/html'));
+    if (wantsJson) {
+      return res.json(result);
+    }
+    return res.redirect(303, result.redirectPath);
+  } catch (error: any) {
+    console.error('Zoho Payments callback error:', error);
+    const wantsJson =
+      req.path.includes('/webhooks/') ||
+      (req.headers.accept &&
+        req.headers.accept.includes('application/json') &&
+        !req.headers.accept.includes('text/html'));
+    if (wantsJson) {
+      return res.status(400).json({ error: error.message || 'Zoho callback verification failed' });
+    }
+    return res.redirect(
+      303,
+      `/?zoho_status=failure&zoho_error=${encodeURIComponent(error.message || 'Zoho callback verification failed')}`
+    );
+  }
+};
+
+app.post('/api/v1/callbacks/zoho', zohoCallbackHandler);
+app.get('/api/v1/callbacks/zoho', zohoCallbackHandler);
+app.post('/api/v1/webhooks/zoho', zohoCallbackHandler);
 
 // Fetch Verified Payment + Order + Session by Transaction ID (for post-redirect receipt display)
 app.get('/api/v1/payments/by-txnid/:txnid', async (req, res) => {
@@ -2185,6 +2244,8 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
       publicKeyOrClientId,
       secretOrSalt,
       webhookSecret,
+      refreshToken,
+      zohoRegion,
       privateKeyId,
       publicKeyId,
       payglocalPublicKeyPem,
@@ -2288,6 +2349,15 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
       }
     }
 
+    if (code === 'ZOHO_PAYMENTS') {
+      if (zohoRegion !== undefined) {
+        existingRuleObj.zohoRegion = normalizeZohoRegion(String(zohoRegion));
+      }
+      if (refreshToken !== undefined && !String(refreshToken).includes('••')) {
+        existingRuleObj.refreshToken = String(refreshToken).replace(/['"\r\n\t|]/g, '').trim();
+      }
+    }
+
     const updated = await db
       .update(paymentGateways)
       .set({
@@ -2353,6 +2423,9 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
         ...updated[0],
         secretOrSalt: rawUpdatedSecret,
         webhookSecret: updated[0].webhookSecret || '',
+        refreshToken: String(existingRuleObj.refreshToken || '').trim(),
+        zohoRegion: normalizeZohoRegion(existingRuleObj.zohoRegion || 'IN'),
+        hasRefreshTokenConfigured: Boolean(String(existingRuleObj.refreshToken || '').trim().length > 0),
         privateKeyId: String(existingRuleObj.privateKeyId || updated[0].publicKeyOrClientId || '').trim(),
         publicKeyId: String(existingRuleObj.publicKeyId || updated[0].publicKeyOrClientId || '').trim(),
         payglocalPublicKeyPem: updatedPubPem,
@@ -2411,15 +2484,17 @@ app.post('/api/v1/gateways/:code/verify', optionalAuth, async (req: AuthRequest,
         ? `PayU India SHA-512 Key "${resolved.merchantKey}" (${resolved.merchantKey.length} chars) & Salt (${resolved.merchantSalt.length} chars) ready for ${targetUrl}.${isNumericKeyWarning}`
         : 'Missing PayU Merchant Key or Merchant Salt. Please enter both from PayU Dashboard → Developer → API Keys.';
     } else if (code === 'ZOHO_PAYMENTS') {
-      signaturePreview =
-        crypto
-          .createHmac('sha256', rawSecret || 'MISSING_SECRET')
-          .update(`${gw.merchantId || 'ZOHO'}|10000|INR`)
-          .digest('hex')
-          .slice(0, 32) + '...';
-      liveApiMessage = verified
-        ? `Zoho Payments Account (${gw.merchantId || 'Configured'}), Client ID & HMAC-SHA256 Signing Key verified (${gw.environment}).`
-        : 'Missing Zoho OAuth Client ID or Client Secret / Signing Key.';
+      const zohoConfig = resolveZohoCredentials(gw);
+      try {
+        const zohoCheck = await ZohoPaymentsAdapter.verifyCredentials(zohoConfig);
+        verified = zohoCheck.verified;
+        signaturePreview = zohoCheck.signaturePreview;
+        liveApiMessage = zohoCheck.message;
+      } catch (err: any) {
+        verified = false;
+        signaturePreview = '';
+        liveApiMessage = `Zoho Payments OAuth / API check failed: ${err.message || 'Check Account ID, Client ID, Client Secret, Refresh Token & Region'}`;
+      }
     } else if (code === 'PAYPAL') {
       signaturePreview =
         crypto

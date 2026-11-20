@@ -42,7 +42,7 @@ export const XPERISERV_POLICIES: XperiservPolicy[] = [
       },
       {
         heading: '3. Compliance with India DPDP Act 2023 & IT Rules',
-        body: 'Personal data is processed strictly for order fulfillment, GST tax invoicing, transactional notifications via Mailgun SMTP, and statutory accounting compliance under Indian law. Data is never sold or rented to third-party marketers.',
+        body: 'Personal data is processed strictly for order fulfillment, GST tax invoicing, transactional notifications via Zoho CPaaS Transactional Email, and statutory accounting compliance under Indian law. Data is never sold or rented to third-party marketers.',
       },
       {
         heading: '4. Principal Rights & Grievance Redressal',
@@ -114,7 +114,7 @@ export const XPERISERV_POLICIES: XperiservPolicy[] = [
     sections: [
       {
         heading: '1. Digital Software, Cloud & Audit Deliverables',
-        body: 'XperiServ Technologies and Allientic Lab Technologies primarily deliver enterprise software, cloud clusters, and security audits electronically. License keys, credentials, and GST invoices are delivered via Mailgun SMTP to the registered email address within 2 to 24 hours of verified payment capture.',
+        body: 'XperiServ Technologies and Allientic Lab Technologies primarily deliver enterprise software, cloud clusters, and security audits electronically. License keys, credentials, and GST invoices are delivered via Zoho CPaaS Transactional Email to the registered email address within 2 to 24 hours of verified payment capture.',
       },
       {
         heading: '2. Hardware & Telemetry Edge Node Kits',
@@ -186,7 +186,7 @@ export const XPERISERV_POLICIES: XperiservPolicy[] = [
       },
       {
         heading: '2. Customer & Billing Support Desk',
-        body: 'Email Support: support@xperiserv.in · Billing & Checkout Escalations: checkout@mg.xperiserv.in · Primary Website: https://xperiserv.in · Checkout Portal: https://checkout.xperiserv.in',
+        body: 'Email Support: support@xperiserv.in · Billing & Checkout Escalations: checkout@xperiserv.in · Primary Website: https://xperiserv.in · Checkout Portal: https://checkout.xperiserv.in',
       },
       {
         heading: '3. Operating & Office Visit Hours',
