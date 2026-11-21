@@ -2275,19 +2275,32 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
       }
     }
 
+    const cleanZohoScalar = (val: any) =>
+      String(val || '')
+        .replace(/[\r\n\t]/g, '')
+        .trim()
+        .replace(/^(['"])(.*)\1$/, '$2')
+        .trim();
+
     let cleanMid =
       merchantId !== undefined
-        ? String(merchantId).replace(/['"\r\n\t|]/g, '').trim()
+        ? code === 'ZOHO_PAYMENTS'
+          ? cleanZohoScalar(merchantId)
+          : String(merchantId).replace(/['"\r\n\t|]/g, '').trim()
         : existing[0].merchantId || '';
     let cleanKey =
       publicKeyOrClientId !== undefined
-        ? String(publicKeyOrClientId).replace(/['"\r\n\t|]/g, '').trim()
+        ? code === 'ZOHO_PAYMENTS'
+          ? cleanZohoScalar(publicKeyOrClientId)
+          : String(publicKeyOrClientId).replace(/['"\r\n\t|]/g, '').trim()
         : existing[0].publicKeyOrClientId || '';
 
     let cleanIncomingSecret: string | undefined;
     if (secretOrSalt !== undefined && !String(secretOrSalt).includes('••')) {
       if (code === 'PAYGLOCAL') {
         cleanIncomingSecret = normalizePemString(String(secretOrSalt), 'PRIVATE');
+      } else if (code === 'ZOHO_PAYMENTS') {
+        cleanIncomingSecret = cleanZohoScalar(String(secretOrSalt).replace(/^enc_aes256_/, ''));
       } else {
         cleanIncomingSecret = String(secretOrSalt)
           .replace(/^enc_aes256_/, '')
@@ -2320,7 +2333,9 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
         ? webhookSecret === ''
           ? ''
           : !String(webhookSecret).includes('••')
-          ? String(webhookSecret).replace(/['"\r\n\t|]/g, '').trim()
+          ? code === 'ZOHO_PAYMENTS'
+            ? cleanZohoScalar(webhookSecret)
+            : String(webhookSecret).replace(/['"\r\n\t|]/g, '').trim()
           : existing[0].webhookSecret
         : existing[0].webhookSecret;
 
@@ -2354,7 +2369,7 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
         existingRuleObj.zohoRegion = normalizeZohoRegion(String(zohoRegion));
       }
       if (refreshToken !== undefined && !String(refreshToken).includes('••')) {
-        existingRuleObj.refreshToken = String(refreshToken).replace(/['"\r\n\t|]/g, '').trim();
+        existingRuleObj.refreshToken = cleanZohoScalar(refreshToken);
       }
     }
 
@@ -2442,6 +2457,271 @@ app.patch('/api/v1/gateways/:code', optionalAuth, async (req: AuthRequest, res) 
   }
 });
 
+// Zoho Payments 1-Click ORG OAuth URL Builder
+app.post('/api/v1/gateways/ZOHO_PAYMENTS/oauth-url', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    await ensureSeeded();
+    const rows = await db
+      .select()
+      .from(paymentGateways)
+      .where(eq(paymentGateways.code, 'ZOHO_PAYMENTS'));
+    const gw = rows[0];
+    if (!gw) {
+      return res.status(404).json({ error: 'Zoho Payments gateway not configured' });
+    }
+
+    const baseConfig = resolveZohoCredentials(gw);
+    const mergedConfig = {
+      ...baseConfig,
+      environment: ((req.body?.environment as 'SANDBOX' | 'PRODUCTION') || baseConfig.environment),
+      region: req.body?.zohoRegion
+        ? normalizeZohoRegion(String(req.body.zohoRegion))
+        : baseConfig.region,
+      accountId: req.body?.accountId ? String(req.body.accountId).trim() : baseConfig.accountId,
+      clientId: req.body?.clientId ? String(req.body.clientId).trim() : baseConfig.clientId,
+      clientSecret:
+        req.body?.clientSecret && !String(req.body.clientSecret).includes('••')
+          ? String(req.body.clientSecret).trim()
+          : baseConfig.clientSecret,
+    };
+
+    const redirectUri = req.body?.redirectUri
+      ? String(req.body.redirectUri).trim()
+      : `${getRequestBaseUrl(req)}/api/v1/oauth/zoho/callback`;
+
+    const result = ZohoPaymentsAdapter.buildOrgOAuthAuthorizeUrl(mergedConfig, redirectUri);
+    res.json(result);
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to generate Zoho ORG OAuth URL' });
+  }
+});
+
+// Zoho Payments ORG OAuth Redirect Callback (exchanges ?code= for permanent refresh_token)
+app.get('/api/v1/oauth/zoho/callback', async (req, res) => {
+  const code = String(req.query.code || '').trim();
+  const errorParam = String(req.query.error || req.query.error_description || '').trim();
+  const locationParam = String(
+    req.query.location || req.query['accounts-server'] || ''
+  ).trim();
+
+  if (errorParam || !code) {
+    const reason = errorParam || 'Zoho did not return an authorization code.';
+    return res.redirect(
+      303,
+      `/admin?section=gateways&zoho_oauth_error=${encodeURIComponent(reason)}`
+    );
+  }
+
+  try {
+    await ensureSeeded();
+    const rows = await db
+      .select()
+      .from(paymentGateways)
+      .where(eq(paymentGateways.code, 'ZOHO_PAYMENTS'));
+    const gw = rows[0];
+    if (!gw) {
+      return res.redirect(
+        303,
+        `/admin?section=gateways&zoho_oauth_error=${encodeURIComponent('Zoho Payments gateway row not found')}`
+      );
+    }
+
+    const baseConfig = resolveZohoCredentials(gw);
+    const effectiveConfig = {
+      ...baseConfig,
+      region: locationParam ? normalizeZohoRegion(locationParam) : baseConfig.region,
+    };
+    const redirectUri = `${getRequestBaseUrl(req)}/api/v1/oauth/zoho/callback`;
+
+    const exchange = await ZohoPaymentsAdapter.exchangeAuthorizationCode(
+      effectiveConfig,
+      code,
+      redirectUri
+    );
+
+    let ruleObj: Record<string, any> = {};
+    try {
+      ruleObj = JSON.parse(gw.routingRuleJson || '{}') || {};
+    } catch {
+      ruleObj = {};
+    }
+
+    const finalRefreshToken = exchange.refreshToken || effectiveConfig.refreshToken || '';
+    if (!finalRefreshToken) {
+      return res.redirect(
+        303,
+        `/admin?section=gateways&zoho_oauth_error=${encodeURIComponent('Zoho exchanged the code for an access token, but did not issue a refresh_token. Revoke the previous authorization in Zoho Accounts → Security → Authorized Websites and reconnect with prompt=consent.')}`
+      );
+    }
+
+    ruleObj.zohoRegion = exchange.oauthRegion;
+    ruleObj.refreshToken = finalRefreshToken;
+
+    const verifyRes = await ZohoPaymentsAdapter.verifyCredentials({
+      ...effectiveConfig,
+      region: exchange.oauthRegion,
+      refreshToken: finalRefreshToken,
+    }).catch((err: any) => ({
+      verified: false,
+      message: err?.message || 'Verification failed after OAuth callback',
+    }));
+
+    await db
+      .update(paymentGateways)
+      .set({
+        routingRuleJson: JSON.stringify(ruleObj),
+        healthStatus: verifyRes.verified ? 'Healthy' : 'Attention Required',
+        lastHealthCheckAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(paymentGateways.code, 'ZOHO_PAYMENTS'));
+
+    await db.insert(auditLogs).values({
+      actorEmail: 'admin@xperiserv.in',
+      actorRole: 'Super Administrator',
+      action: 'ZOHO_OAUTH_CONNECTED',
+      resourceType: 'payment_gateway',
+      resourceId: 'ZOHO_PAYMENTS',
+      severity: 'INFO',
+      detailsJson: JSON.stringify({
+        oauthRegion: exchange.oauthRegion,
+        verified: verifyRes.verified,
+        message: verifyRes.message,
+      }),
+    });
+
+    const msgParam = encodeURIComponent(
+      verifyRes.message || `Zoho Payments OAuth connected on ${exchange.oauthRegion}!`
+    );
+    return res.redirect(
+      303,
+      `/admin?section=gateways&zoho_oauth=success&zoho_oauth_msg=${msgParam}`
+    );
+  } catch (err: any) {
+    return res.redirect(
+      303,
+      `/admin?section=gateways&zoho_oauth_error=${encodeURIComponent(err.message || 'Zoho OAuth token exchange failed')}`
+    );
+  }
+});
+
+// Exchange a 1-time Zoho Grant Code (from API Console Self Client / OAuth) for a permanent Refresh Token
+app.post('/api/v1/gateways/ZOHO_PAYMENTS/exchange-code', optionalAuth, async (req: AuthRequest, res) => {
+  try {
+    await ensureSeeded();
+    const {
+      grantCode,
+      redirectUri,
+      accountId,
+      clientId,
+      clientSecret,
+      zohoRegion,
+      environment,
+    } = req.body || {};
+
+    if (!grantCode || !String(grantCode).trim()) {
+      return res.status(400).json({ error: 'Grant Code is required.' });
+    }
+
+    const rows = await db
+      .select()
+      .from(paymentGateways)
+      .where(eq(paymentGateways.code, 'ZOHO_PAYMENTS'));
+    const gw = rows[0];
+    if (!gw) {
+      return res.status(404).json({ error: 'Zoho Payments gateway not found' });
+    }
+
+    const baseConfig = resolveZohoCredentials(gw);
+    const mergedConfig = {
+      ...baseConfig,
+      environment: ((environment as 'SANDBOX' | 'PRODUCTION') || baseConfig.environment),
+      region: zohoRegion ? normalizeZohoRegion(String(zohoRegion)) : baseConfig.region,
+      accountId: accountId ? String(accountId).trim() : baseConfig.accountId,
+      clientId: clientId ? String(clientId).trim() : baseConfig.clientId,
+      clientSecret:
+        clientSecret && !String(clientSecret).includes('••')
+          ? String(clientSecret).trim()
+          : baseConfig.clientSecret,
+    };
+
+    const callbackUri = redirectUri
+      ? String(redirectUri).trim()
+      : `${getRequestBaseUrl(req)}/api/v1/oauth/zoho/callback`;
+
+    const exchange = await ZohoPaymentsAdapter.exchangeAuthorizationCode(
+      mergedConfig,
+      String(grantCode).trim(),
+      callbackUri
+    );
+
+    const finalRefreshToken = exchange.refreshToken || mergedConfig.refreshToken || '';
+    if (!finalRefreshToken) {
+      return res.status(400).json({
+        error:
+          'Zoho accepted the code and issued an access token, but did not include a refresh_token. Generate the code with offline access or use the "Authorize with Zoho ORG OAuth" button.',
+      });
+    }
+
+    let ruleObj: Record<string, any> = {};
+    try {
+      ruleObj = JSON.parse(gw.routingRuleJson || '{}') || {};
+    } catch {
+      ruleObj = {};
+    }
+    ruleObj.zohoRegion = exchange.oauthRegion;
+    ruleObj.refreshToken = finalRefreshToken;
+
+    const updatedSecret = mergedConfig.clientSecret
+      ? `enc_aes256_${mergedConfig.clientSecret}`
+      : gw.encryptedSecretOrSalt;
+
+    const verifyCheck = await ZohoPaymentsAdapter.verifyCredentials({
+      ...mergedConfig,
+      region: exchange.oauthRegion,
+      refreshToken: finalRefreshToken,
+    }).catch((err: any) => ({
+      verified: false,
+      signaturePreview: '',
+      message: `Refresh token saved, but Zoho Payments API check failed: ${err.message}`,
+    }));
+
+    const updatedRows = await db
+      .update(paymentGateways)
+      .set({
+        environment: mergedConfig.environment,
+        merchantId: mergedConfig.accountId,
+        publicKeyOrClientId: mergedConfig.clientId,
+        encryptedSecretOrSalt: updatedSecret,
+        routingRuleJson: JSON.stringify(ruleObj),
+        healthStatus: verifyCheck.verified ? 'Healthy' : 'Attention Required',
+        lastHealthCheckAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(paymentGateways.code, 'ZOHO_PAYMENTS'))
+      .returning();
+
+    res.json({
+      verified: verifyCheck.verified,
+      refreshTokenSaved: true,
+      oauthRegion: exchange.oauthRegion,
+      signaturePreview: verifyCheck.signaturePreview || '',
+      message: verifyCheck.message,
+      checkedAt: new Date().toISOString(),
+      gateway: {
+        ...updatedRows[0],
+        secretOrSalt: mergedConfig.clientSecret,
+        refreshToken: finalRefreshToken,
+        zohoRegion: exchange.oauthRegion,
+        hasRefreshTokenConfigured: true,
+        hasSecretConfigured: Boolean(mergedConfig.clientSecret),
+      },
+    });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Failed to exchange Zoho Grant Code' });
+  }
+});
+
 // Verify Payment Gateway Keys & Cryptographic Signing (PayU, Zoho Payments, PayPal)
 app.post('/api/v1/gateways/:code/verify', optionalAuth, async (req: AuthRequest, res) => {
   try {
@@ -2465,6 +2745,7 @@ app.post('/api/v1/gateways/:code/verify', optionalAuth, async (req: AuthRequest,
     let signaturePreview = '';
     let liveApiMessage = '';
     let verified = hasPublicKey && hasSecret;
+    let extraMeta: Record<string, any> = {};
 
     if (code === 'PAYU') {
       const resolved = resolvePayUCredentials(gw);
@@ -2490,6 +2771,22 @@ app.post('/api/v1/gateways/:code/verify', optionalAuth, async (req: AuthRequest,
         verified = zohoCheck.verified;
         signaturePreview = zohoCheck.signaturePreview;
         liveApiMessage = zohoCheck.message;
+        if (zohoCheck.oauthRegionUsed) {
+          extraMeta.oauthRegionUsed = zohoCheck.oauthRegionUsed;
+          if (zohoCheck.verified && zohoCheck.oauthRegionUsed !== zohoConfig.region) {
+            let ruleObj: Record<string, any> = {};
+            try {
+              ruleObj = JSON.parse(gw.routingRuleJson || '{}') || {};
+            } catch {
+              ruleObj = {};
+            }
+            ruleObj.zohoRegion = zohoCheck.oauthRegionUsed;
+            await db
+              .update(paymentGateways)
+              .set({ routingRuleJson: JSON.stringify(ruleObj), updatedAt: new Date() })
+              .where(eq(paymentGateways.code, 'ZOHO_PAYMENTS'));
+          }
+        }
       } catch (err: any) {
         verified = false;
         signaturePreview = '';
@@ -2575,6 +2872,7 @@ app.post('/api/v1/gateways/:code/verify', optionalAuth, async (req: AuthRequest,
       signaturePreview,
       message: liveApiMessage,
       checkedAt: new Date().toISOString(),
+      ...extraMeta,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Gateway verification failed' });

@@ -344,6 +344,10 @@ export default function App() {
       }
     >
   >({});
+  const [zohoGrantCode, setZohoGrantCode] = useState<string>('');
+  const [exchangingZohoCode, setExchangingZohoCode] = useState<boolean>(false);
+  const [generatingZohoOAuthUrl, setGeneratingZohoOAuthUrl] = useState<boolean>(false);
+  const [zohoAuthorizeUrl, setZohoAuthorizeUrl] = useState<string | null>(null);
 
   // Routing State: / is Customer Storefront; /admin is Admin Portal (Login or Dashboard)
   const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() => {
@@ -358,6 +362,42 @@ export default function App() {
       const queryPayToken = (params.get('pay') || '').trim();
       if (path.startsWith('/admin')) {
         setIsAdminRoute(true);
+        const sectionParam = params.get('section') as AdminSection | null;
+        if (sectionParam) {
+          setActiveSection(sectionParam);
+        }
+        const zohoStatus = params.get('zoho_oauth');
+        const zohoErr = params.get('zoho_oauth_error');
+        const zohoMsg = params.get('zoho_oauth_msg');
+        if (zohoStatus === 'success') {
+          setActiveSection('gateways');
+          const msg = zohoMsg || 'Zoho Payments ORG OAuth connected and verified!';
+          setGatewayVerificationResults((prev) => ({
+            ...prev,
+            ZOHO_PAYMENTS: {
+              verified: true,
+              message: msg,
+              signaturePreview: 'zoho_org_oauth_verified',
+              checkedAt: new Date().toISOString(),
+            },
+          }));
+          setActionFeedback(msg);
+          window.history.replaceState({}, '', '/admin');
+        } else if (zohoErr) {
+          setActiveSection('gateways');
+          const errMsg = `Zoho OAuth failed: ${zohoErr}`;
+          setGatewayVerificationResults((prev) => ({
+            ...prev,
+            ZOHO_PAYMENTS: {
+              verified: false,
+              message: errMsg,
+              signaturePreview: '',
+              checkedAt: new Date().toISOString(),
+            },
+          }));
+          setActionFeedback(errMsg);
+          window.history.replaceState({}, '', '/admin');
+        }
       } else if (path.startsWith('/pay/') || queryPayToken) {
         setIsAdminRoute(false);
         const token = path.startsWith('/pay/')
@@ -967,6 +1007,149 @@ export default function App() {
       showToast(`Verification check failed for ${gw.displayName}`);
     } finally {
       setVerifyingGatewayCode(null);
+    }
+  };
+
+  const handleZohoOrgOAuthConnect = async (gw: any) => {
+    const draft = gatewayEdits[gw.code] || {
+      environment: gw.environment || 'PRODUCTION',
+      merchantId: gw.merchantId || '',
+      publicKeyOrClientId: gw.publicKeyOrClientId || '',
+      secretOrSalt: gw.secretOrSalt || '',
+      webhookSecret: gw.webhookSecret || '',
+      refreshToken: gw.refreshToken || '',
+      zohoRegion: gw.zohoRegion || 'IN',
+    };
+    setGeneratingZohoOAuthUrl(true);
+    try {
+      // Save current draft credentials first so callback handler reads latest Account ID & Secret
+      await fetch(`/api/v1/gateways/${gw.code}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          environment: draft.environment,
+          merchantId: (draft.merchantId || '').trim(),
+          publicKeyOrClientId: (draft.publicKeyOrClientId || '').trim(),
+          secretOrSalt: (draft.secretOrSalt || '').trim(),
+          webhookSecret: (draft.webhookSecret || '').trim(),
+          zohoRegion: draft.zohoRegion || 'IN',
+        }),
+      });
+
+      const redirectUri = `${window.location.origin}/api/v1/oauth/zoho/callback`;
+      const res = await fetch('/api/v1/gateways/ZOHO_PAYMENTS/oauth-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          environment: draft.environment,
+          zohoRegion: draft.zohoRegion || 'IN',
+          accountId: (draft.merchantId || '').trim(),
+          clientId: (draft.publicKeyOrClientId || '').trim(),
+          clientSecret: (draft.secretOrSalt || '').trim(),
+          redirectUri,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setGatewayVerificationResults((prev) => ({
+          ...prev,
+          ZOHO_PAYMENTS: {
+            verified: false,
+            message: data.error || 'Could not generate Zoho ORG OAuth link',
+            signaturePreview: '',
+            checkedAt: new Date().toISOString(),
+          },
+        }));
+        showToast(data.error || 'Could not generate Zoho ORG OAuth link');
+        return;
+      }
+
+      setZohoAuthorizeUrl(data.authorizeUrl);
+      showToast('Zoho ORG OAuth consent link ready — opening authorization...');
+      try {
+        if (window.top && window.top !== window.self) {
+          window.top.location.assign(data.authorizeUrl);
+        } else {
+          window.location.assign(data.authorizeUrl);
+        }
+      } catch {
+        // If iframe sandbox blocks cross-origin top navigation, user can click the rendered <a target="_top"> button
+      }
+    } catch {
+      showToast('Failed to prepare Zoho ORG OAuth connection');
+    } finally {
+      setGeneratingZohoOAuthUrl(false);
+    }
+  };
+
+  const handleExchangeZohoGrantCode = async (gw: any) => {
+    const code = zohoGrantCode.trim();
+    if (!code) {
+      showToast('Paste your 1-time Zoho Grant Code (1000.xxxx) first.');
+      return;
+    }
+    const draft = gatewayEdits[gw.code] || {
+      environment: gw.environment || 'PRODUCTION',
+      merchantId: gw.merchantId || '',
+      publicKeyOrClientId: gw.publicKeyOrClientId || '',
+      secretOrSalt: gw.secretOrSalt || '',
+      zohoRegion: gw.zohoRegion || 'IN',
+    };
+    setExchangingZohoCode(true);
+    try {
+      const res = await fetch('/api/v1/gateways/ZOHO_PAYMENTS/exchange-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          grantCode: code,
+          redirectUri: `${window.location.origin}/api/v1/oauth/zoho/callback`,
+          accountId: (draft.merchantId || '').trim(),
+          clientId: (draft.publicKeyOrClientId || '').trim(),
+          clientSecret: (draft.secretOrSalt || '').trim(),
+          zohoRegion: draft.zohoRegion || 'IN',
+          environment: draft.environment || 'PRODUCTION',
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setZohoGrantCode('');
+        setGatewayVerificationResults((prev) => ({
+          ...prev,
+          ZOHO_PAYMENTS: {
+            verified: Boolean(data.verified),
+            message: data.message,
+            signaturePreview: data.signaturePreview || '',
+            checkedAt: data.checkedAt || new Date().toISOString(),
+          },
+        }));
+        if (data.gateway) {
+          setGatewayEdits((prev) => ({
+            ...prev,
+            ZOHO_PAYMENTS: {
+              ...(prev.ZOHO_PAYMENTS || draft),
+              refreshToken: data.gateway.refreshToken || '',
+              zohoRegion: data.oauthRegion || data.gateway.zohoRegion || draft.zohoRegion || 'IN',
+            },
+          }));
+        }
+        await fetchPlatformData();
+        showToast(data.message || 'Zoho Grant Code exchanged & Refresh Token saved!');
+      } else {
+        setGatewayVerificationResults((prev) => ({
+          ...prev,
+          ZOHO_PAYMENTS: {
+            verified: false,
+            message: data.error || 'Grant code exchange failed',
+            signaturePreview: '',
+            checkedAt: new Date().toISOString(),
+          },
+        }));
+        showToast(data.error || 'Grant code exchange failed');
+      }
+    } catch {
+      showToast('Failed to exchange Zoho Grant Code');
+    } finally {
+      setExchangingZohoCode(false);
     }
   };
 
@@ -3251,61 +3434,148 @@ export default function App() {
                               </div>
                             )}
 
-                            {isZoho && (
-                              <div className="bg-slate-950 border border-emerald-500/30 rounded-lg p-3.5 space-y-2.5 text-xs">
-                                <div className="flex items-center justify-between gap-2 flex-wrap">
-                                  <span className="font-semibold text-emerald-300">
-                                    Zoho Payments Hosted Payment Links API (OAuth 2.0)
-                                  </span>
-                                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300">
-                                    {draft.environment === 'PRODUCTION'
-                                      ? `payments.zoho.${(draft.zohoRegion || 'IN').toLowerCase() === 'com' ? 'com' : (draft.zohoRegion || 'IN').toLowerCase() === 'au' ? 'com.au' : (draft.zohoRegion || 'IN').toLowerCase()}/api/v1`
-                                      : `payments-sandbox.zoho.${(draft.zohoRegion || 'IN').toLowerCase() === 'com' ? 'com' : (draft.zohoRegion || 'IN').toLowerCase() === 'au' ? 'com.au' : (draft.zohoRegion || 'IN').toLowerCase()}/api/v1`}
-                                  </span>
-                                </div>
+                            {isZoho && (() => {
+                              const regionCode = (draft.zohoRegion || 'IN').toLowerCase();
+                              const zohoDomain =
+                                regionCode === 'com' ? 'com' : regionCode === 'au' ? 'com.au' : regionCode;
+                              const apiConsoleCreateUrl = `https://api-console.zoho.${zohoDomain}/add?client_type=ORG`;
+                              const oauthRedirectUri =
+                                typeof window !== 'undefined'
+                                  ? `${window.location.origin}/api/v1/oauth/zoho/callback`
+                                  : 'https://checkout.xperiserv.in/api/v1/oauth/zoho/callback';
+                              return (
+                                <div className="bg-slate-950 border border-emerald-500/30 rounded-lg p-3.5 space-y-2.5 text-xs">
+                                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                                    <span className="font-semibold text-emerald-300">
+                                      Zoho Payments Hosted Payment Links API (ORG OAuth 2.0)
+                                    </span>
+                                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300">
+                                      {draft.environment === 'PRODUCTION'
+                                        ? `payments.zoho.${zohoDomain}/api/v1`
+                                        : `payments-sandbox.zoho.${zohoDomain}/api/v1`}
+                                    </span>
+                                  </div>
 
-                                <div className="bg-slate-900/90 border border-slate-800 rounded p-2.5 space-y-1.5 text-[11px]">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <span className="text-slate-400">Zoho Callback Return URL:</span>
+                                  <div className="bg-amber-950/35 border border-amber-500/30 rounded p-2.5 text-[11px] text-amber-200 leading-relaxed space-y-1">
+                                    <div className="font-semibold text-amber-300">
+                                      Fixing <span className="font-mono">invalid_client</span>: Create an ORG OAuth Client (NOT Widget API Key)
+                                    </div>
+                                    <div>
+                                      1. Open{' '}
+                                      <a
+                                        href={apiConsoleCreateUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="font-mono text-emerald-300 underline hover:text-emerald-200"
+                                      >
+                                        api-console.zoho.{zohoDomain}/add?client_type=ORG ↗
+                                      </a>{' '}
+                                      (matching your Zoho DC) and choose <strong className="text-white">Server-based Applications</strong>.
+                                    </div>
+                                    <div>
+                                      2. Add the <strong className="text-white">Authorized Redirect URI</strong> below, then paste your <strong className="text-white">Client ID (1000.xxxx)</strong> &amp; <strong className="text-white">Client Secret</strong> (never the <span className="font-mono">1003.xxxx</span> Widget key from Developer Space).
+                                    </div>
+                                  </div>
+
+                                  <div className="bg-slate-900/90 border border-slate-800 rounded p-2.5 space-y-1.5 text-[11px]">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="text-slate-400 shrink-0">OAuth Redirect URI:</span>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          navigator.clipboard.writeText(oauthRedirectUri);
+                                          showToast(`Copied Zoho OAuth Redirect URI: ${oauthRedirectUri}`);
+                                        }}
+                                        className="font-mono text-emerald-400 hover:underline truncate"
+                                      >
+                                        {oauthRedirectUri} (Copy)
+                                      </button>
+                                    </div>
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="text-slate-400 shrink-0">Payment Callback URL:</span>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const url = `${window.location.origin}/api/v1/callbacks/zoho`;
+                                          navigator.clipboard.writeText(url);
+                                          showToast(`Copied Zoho Callback URL: ${url}`);
+                                        }}
+                                        className="font-mono text-emerald-400 hover:underline truncate"
+                                      >
+                                        {typeof window !== 'undefined'
+                                          ? `${window.location.origin}/api/v1/callbacks/zoho`
+                                          : 'https://checkout.xperiserv.in/api/v1/callbacks/zoho'}{' '}
+                                        (Copy)
+                                      </button>
+                                    </div>
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="text-slate-400 shrink-0">Zoho Webhook URL:</span>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const url = `${window.location.origin}/api/v1/webhooks/zoho`;
+                                          navigator.clipboard.writeText(url);
+                                          showToast(`Copied Zoho Webhook URL: ${url}`);
+                                        }}
+                                        className="font-mono text-emerald-400 hover:underline truncate"
+                                      >
+                                        {typeof window !== 'undefined'
+                                          ? `${window.location.origin}/api/v1/webhooks/zoho`
+                                          : 'https://checkout.xperiserv.in/api/v1/webhooks/zoho'}{' '}
+                                        (Copy)
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex flex-wrap items-center gap-2 pt-0.5">
                                     <button
                                       type="button"
-                                      onClick={() => {
-                                        const url = `${window.location.origin}/api/v1/callbacks/zoho`;
-                                        navigator.clipboard.writeText(url);
-                                        showToast(`Copied Zoho Callback URL: ${url}`);
-                                      }}
-                                      className="font-mono text-emerald-400 hover:underline truncate"
+                                      disabled={generatingZohoOAuthUrl}
+                                      onClick={() => handleZohoOrgOAuthConnect(gw)}
+                                      className="px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-semibold text-[11px] transition-colors disabled:opacity-50"
                                     >
-                                      {typeof window !== 'undefined'
-                                        ? `${window.location.origin}/api/v1/callbacks/zoho`
-                                        : 'https://checkout.xperiserv.in/api/v1/callbacks/zoho'}{' '}
-                                      (Copy)
+                                      {generatingZohoOAuthUrl
+                                        ? 'Preparing ORG OAuth...'
+                                        : '1-Click Authorize with Zoho ORG OAuth'}
                                     </button>
+                                    {zohoAuthorizeUrl && (
+                                      <a
+                                        href={zohoAuthorizeUrl}
+                                        target="_top"
+                                        rel="noopener noreferrer"
+                                        className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-[11px] transition-colors inline-flex items-center gap-1"
+                                      >
+                                        <span>Open Zoho Consent Screen</span>
+                                        <ExternalLink className="w-3 h-3" />
+                                      </a>
+                                    )}
                                   </div>
-                                  <div className="flex items-center justify-between gap-2">
-                                    <span className="text-slate-400">Zoho Webhook URL:</span>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        const url = `${window.location.origin}/api/v1/webhooks/zoho`;
-                                        navigator.clipboard.writeText(url);
-                                        showToast(`Copied Zoho Webhook URL: ${url}`);
-                                      }}
-                                      className="font-mono text-emerald-400 hover:underline truncate"
-                                    >
-                                      {typeof window !== 'undefined'
-                                        ? `${window.location.origin}/api/v1/webhooks/zoho`
-                                        : 'https://checkout.xperiserv.in/api/v1/webhooks/zoho'}{' '}
-                                      (Copy)
-                                    </button>
-                                  </div>
-                                </div>
 
-                                <div className="text-[11px] text-slate-400 leading-relaxed">
-                                  Enter your <strong className="text-slate-200">Account ID</strong> from Zoho Payments Settings, plus your <strong className="text-slate-200">OAuth Client ID, Client Secret, and Refresh Token</strong> (<span className="font-mono text-emerald-300">ZohoPay.payments.CREATE,READ</span>).
+                                  <div className="pt-1.5 border-t border-slate-800/80 space-y-1.5">
+                                    <div className="text-[11px] text-slate-400">
+                                      Or paste a 1-time Grant Code (<span className="font-mono text-slate-200">1000.xxxx</span> from Self Client / OAuth) to mint &amp; save your permanent Refresh Token:
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <input
+                                        type="text"
+                                        value={zohoGrantCode}
+                                        onChange={(e) => setZohoGrantCode(e.target.value)}
+                                        placeholder="Paste 1-time Grant Code (1000.xxxx)"
+                                        className="flex-1 bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 font-mono text-[11px] text-slate-100 focus:outline-none focus:border-emerald-500"
+                                      />
+                                      <button
+                                        type="button"
+                                        disabled={exchangingZohoCode}
+                                        onClick={() => handleExchangeZohoGrantCode(gw)}
+                                        className="px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-emerald-300 text-[11px] font-medium disabled:opacity-50"
+                                      >
+                                        {exchangingZohoCode ? 'Exchanging...' : 'Exchange Code'}
+                                      </button>
+                                    </div>
+                                  </div>
                                 </div>
-                              </div>
-                            )}
+                              );
+                            })()}
 
                             <div className="space-y-3 text-xs">
                               <div>
@@ -3317,7 +3587,10 @@ export default function App() {
                                   onChange={(e) =>
                                     setGatewayEdits((prev) => ({
                                       ...prev,
-                                      [gw.code]: { ...draft, environment: e.target.value },
+                                      [gw.code]: {
+                                        ...(prev[gw.code] || draft),
+                                        environment: e.target.value,
+                                      },
                                     }))
                                   }
                                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
@@ -3337,7 +3610,10 @@ export default function App() {
                                   onChange={(e) =>
                                     setGatewayEdits((prev) => ({
                                       ...prev,
-                                      [gw.code]: { ...draft, merchantId: e.target.value },
+                                      [gw.code]: {
+                                        ...(prev[gw.code] || draft),
+                                        merchantId: e.target.value,
+                                      },
                                     }))
                                   }
                                   placeholder={
@@ -3366,7 +3642,10 @@ export default function App() {
                                         onChange={(e) =>
                                           setGatewayEdits((prev) => ({
                                             ...prev,
-                                            [gw.code]: { ...draft, privateKeyId: e.target.value },
+                                            [gw.code]: {
+                                              ...(prev[gw.code] || draft),
+                                              privateKeyId: e.target.value,
+                                            },
                                           }))
                                         }
                                         placeholder="Enter Private Key ID (kid for signing)"
@@ -3384,7 +3663,7 @@ export default function App() {
                                           setGatewayEdits((prev) => ({
                                             ...prev,
                                             [gw.code]: {
-                                              ...draft,
+                                              ...(prev[gw.code] || draft),
                                               publicKeyId: e.target.value,
                                               publicKeyOrClientId: e.target.value,
                                             },
@@ -3557,7 +3836,7 @@ export default function App() {
                                         setGatewayEdits((prev) => ({
                                           ...prev,
                                           [gw.code]: {
-                                            ...draft,
+                                            ...(prev[gw.code] || draft),
                                             publicKeyOrClientId: e.target.value,
                                           },
                                         }))
@@ -3566,7 +3845,7 @@ export default function App() {
                                         isPayU
                                           ? 'Enter PayU Merchant Key'
                                           : isZoho
-                                          ? 'Enter Zoho OAuth Client ID (1000.xxxx)'
+                                          ? 'OAuth Client ID from api-console.zoho (1000.xxxx — NOT 1003. Widget key)'
                                           : 'Enter PayPal REST Client ID (A...)'
                                       }
                                       className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
@@ -3597,7 +3876,10 @@ export default function App() {
                                       onChange={(e) =>
                                         setGatewayEdits((prev) => ({
                                           ...prev,
-                                          [gw.code]: { ...draft, secretOrSalt: e.target.value },
+                                          [gw.code]: {
+                                            ...(prev[gw.code] || draft),
+                                            secretOrSalt: e.target.value,
+                                          },
                                         }))
                                       }
                                       placeholder={
@@ -3619,7 +3901,10 @@ export default function App() {
                                           onChange={(e) =>
                                             setGatewayEdits((prev) => ({
                                               ...prev,
-                                              [gw.code]: { ...draft, zohoRegion: e.target.value },
+                                              [gw.code]: {
+                                                ...(prev[gw.code] || draft),
+                                                zohoRegion: e.target.value,
+                                              },
                                             }))
                                           }
                                           className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
@@ -3635,7 +3920,7 @@ export default function App() {
 
                                       <div>
                                         <label className="text-slate-400 block mb-1 font-medium text-emerald-300">
-                                          Zoho OAuth Refresh Token (Required for Live API) *
+                                          Zoho OAuth Refresh Token (Or use 1-Click ORG OAuth above)
                                         </label>
                                         <input
                                           type={showGatewaySecret[gw.code] ? 'text' : 'password'}
@@ -3643,13 +3928,16 @@ export default function App() {
                                           onChange={(e) =>
                                             setGatewayEdits((prev) => ({
                                               ...prev,
-                                              [gw.code]: { ...draft, refreshToken: e.target.value },
+                                              [gw.code]: {
+                                                ...(prev[gw.code] || draft),
+                                                refreshToken: e.target.value,
+                                              },
                                             }))
                                           }
                                           placeholder={
                                             gw.hasRefreshTokenConfigured
                                               ? '1000.•••••••• (Saved — enter new token to replace)'
-                                              : '1000.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+                                              : '1000.xxxx (Auto-filled via 1-Click OAuth or Grant Code Exchange)'
                                           }
                                           className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
                                         />
@@ -3667,7 +3955,10 @@ export default function App() {
                                   onChange={(e) =>
                                     setGatewayEdits((prev) => ({
                                       ...prev,
-                                      [gw.code]: { ...draft, webhookSecret: e.target.value },
+                                      [gw.code]: {
+                                        ...(prev[gw.code] || draft),
+                                        webhookSecret: e.target.value,
+                                      },
                                     }))
                                   }
                                   placeholder={
@@ -3689,7 +3980,7 @@ export default function App() {
                                       setGatewayEdits((prev) => ({
                                         ...prev,
                                         [gw.code]: {
-                                          ...draft,
+                                          ...(prev[gw.code] || draft),
                                           supportedCurrencies: e.target.value,
                                         },
                                       }))
@@ -3706,7 +3997,7 @@ export default function App() {
                                       setGatewayEdits((prev) => ({
                                         ...prev,
                                         [gw.code]: {
-                                          ...draft,
+                                          ...(prev[gw.code] || draft),
                                           supportedMethods: e.target.value,
                                         },
                                       }))
